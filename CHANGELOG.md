@@ -22,6 +22,7 @@ Format follows a product-engineering changelog style: each version includes impl
 ### Changed
 
 - Hardened provider session reuse so invocation execution resolves the owning `threadId` once and skips `agent_session` lookup/save when a task has become orphaned after thread deletion, preventing successful provider runs from failing during session persistence (2026-07-01).
+- Replaced example MySQL credentials and default password fallbacks with placeholders/empty defaults in `.env.example`, `README.md`, and MySQL configuration (2026-07-01).
 - Cleaned Python generated artifacts from `services/agent-runtime/src` (`__pycache__`, `*.pyc`, and `agent_crossing_agent_runtime.egg-info`) and added explicit ignore rules so stale cache files such as the old `opencode_planner` bytecode no longer pollute search or review results (2026-07-01).
 - Expanded `.gitignore` coverage for local AI tooling (`.agents/`, `.codex/`, `.claude/settings.local.json`, `skills-lock.json`), stale Next.js cache directories (`.next.stale-*`), and TypeScript incremental build metadata (`*.tsbuildinfo`) after auditing generated and machine-local files (2026-07-01).
 - Added `spec/` to `.gitignore` so local planning/spec drafts stay out of repository commits (2026-07-01).

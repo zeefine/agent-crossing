@@ -27,8 +27,8 @@ public class MybatisConfig {
     @Bean(destroyMethod = "close")
     public DataSource mysqlDataSource(
             @Value("${spring.datasource.url:jdbc:mysql://${MYSQL_SERVER:localhost}:${MYSQL_PORT:13306}/${MYSQL_DB:agent_crossing}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8}") String jdbcUrl,
-            @Value("${spring.datasource.username:${MYSQL_USER:root}}") String username,
-            @Value("${spring.datasource.password:${MYSQL_PASSWORD:123456}}") String password,
+            @Value("${spring.datasource.username:${MYSQL_USER:}}") String username,
+            @Value("${spring.datasource.password:${MYSQL_PASSWORD:}}") String password,
             @Value("${spring.datasource.driver-class-name:com.mysql.cj.jdbc.Driver}") String driverClassName) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(jdbcUrl);

@@ -117,8 +117,8 @@ SPRING_PROFILES_ACTIVE=mysql
 MYSQL_SERVER=localhost
 MYSQL_PORT=13306
 MYSQL_DB=agent_crossing
-MYSQL_USER=root
-MYSQL_PASSWORD=123456
+MYSQL_USER=<mysql-user>
+MYSQL_PASSWORD=<mysql-password>
 ```
 
 ### 3. Start everything
