@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "taskId": "task-follow-up-1",
+      "agentId": "claude-code",
+      "context": "请复核这个方案",
+      "dependsOn": []
+    },
+    {
+      "taskId": "task-follow-up-2",
+      "agentId": "opencode",
+      "context": "继续补充边界条件",
+      "dependsOn": []
+    }
+  ]
+}

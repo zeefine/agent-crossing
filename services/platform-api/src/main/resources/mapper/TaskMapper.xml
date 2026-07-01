@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.TaskMapper">
+    <resultMap id="TaskResultMap" type="com.agentcrossing.platform.domain.task.Task">
+        <constructor>
+            <idArg column="task_id" javaType="java.lang.String"/>
+            <arg column="user_id" javaType="java.lang.String"/>
+            <arg column="trace_id" javaType="java.lang.String"/>
+            <arg column="created_by_task_id" javaType="java.lang.String"/>
+            <arg column="status" javaType="com.agentcrossing.platform.domain.task.TaskStatus"/>
+            <arg column="source" javaType="com.agentcrossing.platform.domain.task.TaskSource"/>
+            <arg column="depth" javaType="java.lang.Integer"/>
+            <arg column="agent_id" javaType="java.lang.String"/>
+            <arg column="context_text" javaType="java.lang.String"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="updated_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.task.Task">
+        INSERT INTO task (
+            task_id, user_id, trace_id, created_by_task_id,
+            status, source, depth, agent_id, context_text, created_at, updated_at
+        ) VALUES (
+            #{taskId}, #{userId}, #{traceId}, #{createdByTaskId},
+            #{status}, #{source}, #{depth}, #{agentId}, #{context},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{updatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            user_id = VALUES(user_id),
+            trace_id = VALUES(trace_id),
+            created_by_task_id = VALUES(created_by_task_id),
+            status = VALUES(status),
+            source = VALUES(source),
+            depth = VALUES(depth),
+            agent_id = VALUES(agent_id),
+            context_text = VALUES(context_text),
+            created_at = VALUES(created_at),
+            updated_at = VALUES(updated_at)
+    </insert>
+
+    <select id="findByTaskId" resultMap="TaskResultMap">
+        SELECT * FROM task WHERE task_id = #{taskId}
+    </select>
+
+    <select id="findByTaskIdAndUserId" resultMap="TaskResultMap">
+        SELECT * FROM task WHERE task_id = #{taskId} AND user_id = #{userId}
+    </select>
+
+    <select id="findByTraceId" resultMap="TaskResultMap">
+        SELECT * FROM task
+        WHERE trace_id = #{traceId}
+        ORDER BY created_at ASC, task_id ASC
+    </select>
+
+    <select id="findByTraceIdAndUserId" resultMap="TaskResultMap">
+        SELECT * FROM task
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+        ORDER BY created_at ASC, task_id ASC
+    </select>
+
+    <select id="findByStatus" resultMap="TaskResultMap">
+        SELECT * FROM task
+        WHERE status = #{status}
+        ORDER BY created_at ASC, task_id ASC
+    </select>
+
+    <select id="findByStatusAndUserId" resultMap="TaskResultMap">
+        SELECT * FROM task
+        WHERE status = #{status} AND user_id = #{userId}
+        ORDER BY created_at ASC, task_id ASC
+    </select>
+
+    <select id="findAll" resultMap="TaskResultMap">
+        SELECT * FROM task
+        ORDER BY created_at ASC, task_id ASC
+    </select>
+</mapper>

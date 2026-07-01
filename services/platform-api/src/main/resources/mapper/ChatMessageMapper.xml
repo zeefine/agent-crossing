@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.ChatMessageMapper">
+    <!--
+      MODEL_SYNC(ChatMessage) — 改字段时四处同步（无 codegen）：
+        · services/platform-api/src/main/java/com/agentcrossing/platform/domain/message/ChatMessage.java
+        · services/platform-api/src/main/java/com/agentcrossing/platform/api/dto/ChatMessageResponse.java
+        · services/platform-web/lib/api.ts (export type ChatMessage)
+        · services/platform-api/src/main/resources/schema-mysql.sql (chat_message)
+          + services/platform-api/src/main/resources/mapper/ChatMessageMapper.xml  ← 本文件
+    -->
+    <resultMap id="ChatMessageResultMap" type="com.agentcrossing.platform.domain.message.ChatMessage">
+        <constructor>
+            <idArg column="message_id" javaType="java.lang.String"/>
+            <arg column="thread_id" javaType="java.lang.String"/>
+            <arg column="role" javaType="com.agentcrossing.platform.domain.message.ChatMessageRole"/>
+            <arg column="content" javaType="java.lang.String"/>
+            <arg column="status" javaType="com.agentcrossing.platform.domain.message.ChatMessageStatus"/>
+            <arg column="invocation_id" javaType="java.lang.String"/>
+            <arg column="task_id" javaType="java.lang.String"/>
+            <arg column="agent_id" javaType="java.lang.String"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="updated_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.message.ChatMessage">
+        INSERT INTO chat_message (
+            message_id, thread_id, role, content, status,
+            invocation_id, task_id, agent_id, created_at, updated_at
+        ) VALUES (
+            #{messageId}, #{threadId}, #{role}, #{content}, #{status},
+            #{invocationId}, #{taskId}, #{agentId},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{updatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            thread_id = VALUES(thread_id),
+            role = VALUES(role),
+            content = VALUES(content),
+            status = VALUES(status),
+            invocation_id = VALUES(invocation_id),
+            task_id = VALUES(task_id),
+            agent_id = VALUES(agent_id),
+            created_at = VALUES(created_at),
+            updated_at = VALUES(updated_at)
+    </insert>
+
+    <select id="findByThreadId" resultMap="ChatMessageResultMap">
+        SELECT * FROM chat_message
+        WHERE thread_id = #{threadId}
+        ORDER BY created_at ASC, message_id ASC
+    </select>
+
+    <select id="findVisibleMessagesAfterCursor" resultMap="ChatMessageResultMap">
+        SELECT * FROM chat_message
+        WHERE thread_id = #{threadId}
+          AND (
+            role = 'USER'
+            OR (role = 'ASSISTANT' AND agent_id IS NOT NULL AND agent_id != #{currentAgentId})
+          )
+          <if test="lastInjectedCreatedAt != null and lastInjectedMessageId != null">
+          AND (
+            created_at &gt; #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+            OR (
+              created_at = #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+              AND message_id &gt; #{lastInjectedMessageId}
+            )
+          )
+          </if>
+        ORDER BY created_at ASC, message_id ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findAssistantStreamByInvocationId" resultMap="ChatMessageResultMap">
+        SELECT * FROM chat_message
+        WHERE invocation_id = #{invocationId} AND role = 'ASSISTANT'
+        ORDER BY created_at ASC, message_id ASC
+        LIMIT 1
+    </select>
+
+    <delete id="deleteByThreadId">
+        DELETE FROM chat_message WHERE thread_id = #{threadId}
+    </delete>
+</mapper>

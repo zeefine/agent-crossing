@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-crossing.local/schemas/agent-message.schema.json",
+  "$comment": "MODEL_SYNC(AgentMessage) — 改字段时三处同步（无 codegen）: contracts/schemas/agent-message.schema.json | services/platform-api/src/main/java/com/agentcrossing/platform/application/invocation/AgentMessage.java | services/agent-runtime/src/agent_runtime/contracts/models.py (class AgentMessage)",
+  "title": "AgentMessage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["invocationId", "taskId", "traceId", "agentId", "type", "createdAt"],
+  "properties": {
+    "invocationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agentId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["textDelta", "message", "done", "error"]
+    },
+    "content": {
+      "type": "string"
+    },
+    "raw": true,
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+

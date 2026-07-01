@@ -1,0 +1,55 @@
+server:
+  port: ${PLATFORM_API_PORT:8080}
+  address: ${PLATFORM_API_HOST:127.0.0.1}
+
+spring:
+  application:
+    name: agent-crossing-platform-api
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+agent-crossing:
+  storage-mode: ${STORAGE_MODE:memory}
+  agent-runtime:
+    base-url: ${AGENT_RUNTIME_BASE_URL:http://127.0.0.1:8090}
+  callback-base-url: ${PLATFORM_API_BASE_URL:http://127.0.0.1:8080}/api/callback
+  default-agent-id: ${DEFAULT_AGENT_ID:opencode}
+  realtime:
+    sse-enabled: ${SSE_ENABLED:false}
+  agents:
+    - agent-id: opencode
+      display-name: OpenCode
+      role: CLI coding agent for implementation, reasoning, and codebase operations.
+      capabilities:
+        - code reasoning
+        - implementation
+        - command-line execution
+        - project analysis
+      tools:
+        - opencode-cli
+        - filesystem
+        - shell
+    - agent-id: claudecode
+      display-name: ClaudeCode
+      role: CLI coding agent for complex reasoning, code review, and implementation.
+      capabilities:
+        - complex reasoning
+        - code review
+        - architecture analysis
+        - implementation
+        - command-line execution
+      tools:
+        - claude-code-cli
+        - filesystem
+        - shell

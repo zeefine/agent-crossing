@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-crossing.local/schemas/invocation.schema.json",
+  "$comment": "MODEL_SYNC(Invocation) — 改字段时三处同步（无 codegen）: contracts/schemas/invocation.schema.json | services/platform-api/src/main/java/com/agentcrossing/platform/domain/invocation/Invocation.java | services/platform-api/src/main/java/com/agentcrossing/platform/api/dto/InvocationResponse.java",
+  "title": "Invocation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["invocationId", "userId", "taskId", "traceId", "agentId", "status", "createdAt"],
+  "properties": {
+    "invocationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "userId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agentId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "canceled"]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

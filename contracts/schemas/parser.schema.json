@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-crossing.local/schemas/parser.schema.json",
+  "title": "ParserContracts",
+  "$defs": {
+    "ParsedTask": {
+      "$comment": "MODEL_SYNC(ParsedTask) — 改字段时三处同步（无 codegen）: contracts/schemas/parser.schema.json ($defs/ParsedTask) | services/platform-api/src/main/java/com/agentcrossing/platform/application/parser/ParsedTask.java | services/agent-runtime/src/agent_runtime/contracts/models.py (class ParsedTask)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "agentId", "context", "dependsOn"],
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "context": {
+          "type": "string"
+        },
+        "dependsOn": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "AvailableAgentCard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId", "displayName", "role", "capabilities", "tools"],
+      "properties": {
+        "agentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "displayName": { "type": "string" },
+        "role": { "type": "string" },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "UserInputParseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "availableAgents"],
+      "properties": {
+        "userId": {
+          "type": ["string", "null"]
+        },
+        "threadId": {
+          "type": ["string", "null"]
+        },
+        "traceId": {
+          "type": ["string", "null"]
+        },
+        "input": {
+          "type": "string"
+        },
+        "providerSessionId": {
+          "type": ["string", "null"]
+        },
+        "availableAgents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AvailableAgentCard"
+          }
+        }
+      }
+    },
+    "UserInputParseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tasks"],
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParsedTask"
+          }
+        },
+        "directAnswer": {
+          "type": ["string", "null"]
+        },
+        "providerSessionId": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "AgentOutputParseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceTaskId", "sourceAgentId", "output", "availableAgentIds"],
+      "properties": {
+        "sourceTaskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceAgentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "output": {
+          "type": "string"
+        },
+        "availableAgentIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        }
+      }
+    },
+    "AgentOutputParseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tasks"],
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParsedTask"
+          }
+        }
+      }
+    }
+  }
+}

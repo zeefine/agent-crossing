@@ -1,0 +1,4 @@
+{"invocationId":"invocation-001","taskId":"task-analyze","traceId":"trace-001","agentId":"opencode","type":"textDelta","content":"我会先分析需求。","createdAt":"2026-06-13T00:00:00Z"}
+{"invocationId":"invocation-001","taskId":"task-analyze","traceId":"trace-001","agentId":"opencode","type":"message","content":"@claude-code 请复核这个方案","createdAt":"2026-06-13T00:00:01Z"}
+{"invocationId":"invocation-001","taskId":"task-analyze","traceId":"trace-001","agentId":"opencode","type":"done","createdAt":"2026-06-13T00:00:02Z"}
+

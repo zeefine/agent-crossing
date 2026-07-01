@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.AgentSessionMapper">
+    <resultMap id="AgentSessionResultMap" type="com.agentcrossing.platform.domain.session.AgentSession">
+        <constructor>
+            <idArg column="user_id" javaType="java.lang.String"/>
+            <idArg column="thread_id" javaType="java.lang.String"/>
+            <arg column="trace_id" javaType="java.lang.String"/>
+            <idArg column="agent_id" javaType="java.lang.String"/>
+            <idArg column="provider" javaType="java.lang.String"/>
+            <arg column="provider_session_id" javaType="java.lang.String"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="updated_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <select id="findByThreadId" resultMap="AgentSessionResultMap">
+        SELECT * FROM agent_session
+        WHERE user_id = #{userId}
+          AND thread_id = #{threadId}
+          AND agent_id = #{agentId}
+          AND provider = #{provider}
+        ORDER BY updated_at DESC
+        LIMIT 1
+    </select>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.session.AgentSession">
+        INSERT INTO agent_session (
+            user_id, thread_id, trace_id, agent_id, provider,
+            provider_session_id, created_at, updated_at
+        ) VALUES (
+            #{userId}, #{threadId}, #{traceId}, #{agentId}, #{provider},
+            #{providerSessionId},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{updatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            trace_id = VALUES(trace_id),
+            provider_session_id = VALUES(provider_session_id),
+            updated_at = VALUES(updated_at)
+    </insert>
+</mapper>

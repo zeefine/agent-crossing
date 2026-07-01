@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.TaskDependencyMapper">
+    <insert id="insertAll">
+        INSERT IGNORE INTO task_dependency (parent_task_id, child_task_id)
+        VALUES
+        <foreach collection="dependencies" item="dependency" separator=",">
+            (#{dependency.parentTaskId}, #{dependency.childTaskId})
+        </foreach>
+    </insert>
+
+    <select id="findParentTaskIds" resultType="java.lang.String">
+        SELECT parent_task_id
+        FROM task_dependency
+        WHERE child_task_id = #{childTaskId}
+        ORDER BY parent_task_id ASC
+    </select>
+
+    <select id="findChildTaskIds" resultType="java.lang.String">
+        SELECT child_task_id
+        FROM task_dependency
+        WHERE parent_task_id = #{parentTaskId}
+        ORDER BY child_task_id ASC
+    </select>
+
+</mapper>

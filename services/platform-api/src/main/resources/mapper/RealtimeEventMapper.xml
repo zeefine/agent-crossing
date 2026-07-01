@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.RealtimeEventMapper">
+    <resultMap id="RealtimeEventResultMap" type="com.agentcrossing.platform.domain.event.RealtimeEvent">
+        <constructor>
+            <idArg column="event_id" javaType="java.lang.Long"/>
+            <arg column="thread_id" javaType="java.lang.String"/>
+            <arg column="event_type" javaType="java.lang.String"/>
+            <!-- record 字段是 Object，让 MyBatis 按 Object 找 ctor；JsonNodeTypeHandler 内部仍把 JSON 解析成 JsonNode（JsonNode IS-A Object）。 -->
+            <arg column="payload" javaType="java.lang.Object"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.JsonNodeTypeHandler"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="insert"
+            parameterType="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.RealtimeEventInsertParam"
+            useGeneratedKeys="true"
+            keyProperty="eventId"
+            keyColumn="event_id">
+        INSERT INTO realtime_event (
+            thread_id, event_type, payload, created_at
+        ) VALUES (
+            #{threadId}, #{eventType},
+            #{payload, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+    </insert>
+
+    <select id="findAfter" resultMap="RealtimeEventResultMap">
+        SELECT event_id, thread_id, event_type, payload, created_at
+        FROM realtime_event
+        WHERE thread_id = #{threadId} AND event_id &gt; #{lastEventId}
+        ORDER BY event_id ASC
+        LIMIT #{limit}
+    </select>
+
+    <delete id="deleteByThreadId">
+        DELETE FROM realtime_event WHERE thread_id = #{threadId}
+    </delete>
+</mapper>

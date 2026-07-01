@@ -1,0 +1,22 @@
+{
+  "invocationId": "invocation-001",
+  "userId": "user-001",
+  "taskId": "task-analyze",
+  "traceId": "trace-001",
+  "agentId": "opencode",
+  "context": "分析用户需求并给出实现方案",
+  "callbackBaseUrl": "http://127.0.0.1:8080/api/callback",
+  "providerSessionId": "ses_existing_opencode_session",
+  "contextPack": {
+    "incrementalChatMessages": [
+      {
+        "messageId": "message-001",
+        "role": "user",
+        "agentId": null,
+        "taskId": null,
+        "content": "请继续分析当前任务",
+        "createdAt": "2026-06-22T00:00:00Z"
+      }
+    ]
+  }
+}

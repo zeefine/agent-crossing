@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.UserMapper">
+    <resultMap id="UserResultMap" type="com.agentcrossing.platform.domain.user.UserAccount">
+        <constructor>
+            <idArg column="user_id" javaType="java.lang.String"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="updated_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.user.UserAccount">
+        INSERT INTO user_account (user_id, created_at, updated_at)
+        VALUES (
+            #{userId},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{updatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)
+    </insert>
+
+    <select id="findByUserId" resultMap="UserResultMap">
+        SELECT * FROM user_account WHERE user_id = #{userId}
+    </select>
+</mapper>

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-crossing.local/schemas/task.schema.json",
+  "$comment": "MODEL_SYNC(Task wire) — 改 wire 字段时三处同步（无 codegen）: contracts/schemas/task.schema.json | services/platform-api/src/main/java/com/agentcrossing/platform/api/dto/TaskResponse.java | services/platform-web/lib/api.ts (export type Task). Note: domain Task.java does not contain dependsOn; dependsOn is assembled from TaskDependencyRepository/task_dependency.",
+  "title": "Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "userId",
+    "traceId",
+    "createdByTaskId",
+    "dependsOn",
+    "status",
+    "source",
+    "depth",
+    "agentId",
+    "context",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "userId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdByTaskId": {
+      "type": ["string", "null"]
+    },
+    "dependsOn": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "processing", "completed", "failed", "blocked", "canceled"]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["user", "agent"]
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "agentId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "context": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

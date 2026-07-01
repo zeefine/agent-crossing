@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.AgentMapper">
+    <resultMap id="AgentResultMap" type="com.agentcrossing.platform.domain.agent.Agent">
+        <constructor>
+            <idArg column="agent_id" javaType="java.lang.String"/>
+            <arg column="display_name" javaType="java.lang.String"/>
+            <arg column="role_description" javaType="java.lang.String"/>
+            <arg column="capabilities" javaType="java.util.List"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.StringListJsonTypeHandler"/>
+            <arg column="tools" javaType="java.util.List"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.StringListJsonTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.agent.Agent">
+        INSERT INTO agent (
+            agent_id, display_name, role_description, capabilities, tools
+        ) VALUES (
+            #{agentId},
+            #{displayName},
+            #{role},
+            #{capabilities, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.StringListJsonTypeHandler},
+            #{tools, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.StringListJsonTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            display_name = VALUES(display_name),
+            role_description = VALUES(role_description),
+            capabilities = VALUES(capabilities),
+            tools = VALUES(tools)
+    </insert>
+
+    <select id="findByAgentId" resultMap="AgentResultMap">
+        SELECT agent_id, display_name, role_description, capabilities, tools
+        FROM agent
+        WHERE agent_id = #{agentId}
+    </select>
+
+    <select id="findAll" resultMap="AgentResultMap">
+        SELECT agent_id, display_name, role_description, capabilities, tools
+        FROM agent
+        ORDER BY agent_id ASC
+    </select>
+</mapper>

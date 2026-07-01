@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.ChatThreadMapper">
+    <resultMap id="ChatThreadResultMap" type="com.agentcrossing.platform.domain.chat.ChatThread">
+        <constructor>
+            <idArg column="thread_id" javaType="java.lang.String"/>
+            <arg column="user_id" javaType="java.lang.String"/>
+            <arg column="title" javaType="java.lang.String"/>
+            <arg column="status" javaType="com.agentcrossing.platform.domain.chat.ChatThreadStatus"/>
+            <arg column="trace_id" javaType="java.lang.String"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="updated_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.chat.ChatThread">
+        INSERT INTO chat_thread (
+            thread_id, user_id, title, status, trace_id, created_at, updated_at
+        ) VALUES (
+            #{threadId}, #{userId}, #{title}, #{status}, #{traceId},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{updatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            user_id = VALUES(user_id),
+            title = VALUES(title),
+            status = VALUES(status),
+            trace_id = VALUES(trace_id),
+            created_at = VALUES(created_at),
+            updated_at = VALUES(updated_at)
+    </insert>
+
+    <select id="findByThreadId" resultMap="ChatThreadResultMap">
+        SELECT * FROM chat_thread WHERE thread_id = #{threadId}
+    </select>
+
+    <select id="findByThreadIdAndUserId" resultMap="ChatThreadResultMap">
+        SELECT * FROM chat_thread WHERE thread_id = #{threadId} AND user_id = #{userId}
+    </select>
+
+    <select id="findByTraceId" resultMap="ChatThreadResultMap">
+        SELECT * FROM chat_thread
+        WHERE trace_id = #{traceId}
+        LIMIT 1
+    </select>
+
+    <delete id="deleteByThreadId">
+        DELETE FROM chat_thread WHERE thread_id = #{threadId}
+    </delete>
+
+    <select id="findAll" resultMap="ChatThreadResultMap">
+        SELECT * FROM chat_thread
+        ORDER BY updated_at DESC, thread_id ASC
+    </select>
+
+    <select id="findAllByUserId" resultMap="ChatThreadResultMap">
+        SELECT * FROM chat_thread
+        WHERE user_id = #{userId}
+        ORDER BY updated_at DESC, thread_id ASC
+    </select>
+</mapper>

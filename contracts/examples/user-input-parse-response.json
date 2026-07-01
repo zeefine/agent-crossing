@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "taskId": "task-analyze",
+      "agentId": "opencode",
+      "context": "分析用户需求并给出实现方案",
+      "dependsOn": []
+    },
+    {
+      "taskId": "task-review",
+      "agentId": "claude-code",
+      "context": "复核 opencode 的实现方案并指出风险",
+      "dependsOn": ["task-analyze"]
+    }
+  ]
+}

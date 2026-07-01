@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.InvocationMapper">
+    <resultMap id="InvocationResultMap" type="com.agentcrossing.platform.domain.invocation.Invocation">
+        <constructor>
+            <idArg column="invocation_id" javaType="java.lang.String"/>
+            <arg column="user_id" javaType="java.lang.String"/>
+            <arg column="task_id" javaType="java.lang.String"/>
+            <arg column="trace_id" javaType="java.lang.String"/>
+            <arg column="agent_id" javaType="java.lang.String"/>
+            <arg column="status" javaType="com.agentcrossing.platform.domain.invocation.InvocationStatus"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="started_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="completed_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.invocation.Invocation">
+        INSERT INTO invocation (
+            invocation_id, user_id, task_id, trace_id, agent_id,
+            status, created_at, started_at, completed_at
+        ) VALUES (
+            #{invocationId}, #{userId}, #{taskId}, #{traceId}, #{agentId},
+            #{status},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{startedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{completedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            user_id = VALUES(user_id),
+            task_id = VALUES(task_id),
+            trace_id = VALUES(trace_id),
+            agent_id = VALUES(agent_id),
+            status = VALUES(status),
+            created_at = VALUES(created_at),
+            started_at = VALUES(started_at),
+            completed_at = VALUES(completed_at)
+    </insert>
+
+    <select id="findByInvocationId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation WHERE invocation_id = #{invocationId}
+    </select>
+
+    <select id="findByInvocationIdAndUserId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation WHERE invocation_id = #{invocationId} AND user_id = #{userId}
+    </select>
+
+    <select id="findByTaskId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation
+        WHERE task_id = #{taskId}
+        ORDER BY created_at ASC, invocation_id ASC
+    </select>
+
+    <select id="findByTaskIdAndUserId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation
+        WHERE task_id = #{taskId} AND user_id = #{userId}
+        ORDER BY created_at ASC, invocation_id ASC
+    </select>
+
+    <select id="findRunningByAgentId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation
+        WHERE agent_id = #{agentId} AND status = #{status}
+        ORDER BY created_at ASC, invocation_id ASC
+    </select>
+
+    <select id="findRunningByAgentIdAndUserId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation
+        WHERE agent_id = #{agentId} AND user_id = #{userId} AND status = #{status}
+        ORDER BY created_at ASC, invocation_id ASC
+    </select>
+
+    <select id="findAll" resultMap="InvocationResultMap">
+        SELECT * FROM invocation
+        ORDER BY created_at ASC, invocation_id ASC
+    </select>
+</mapper>

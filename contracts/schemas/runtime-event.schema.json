@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-crossing.local/schemas/runtime-event.schema.json",
+  "title": "RuntimeContracts",
+  "$defs": {
+    "AgentExecutionRequest": {
+      "$comment": "MODEL_SYNC(AgentExecutionRequest) — 改字段时三处同步（无 codegen）: contracts/schemas/runtime-event.schema.json ($defs/AgentExecutionRequest) | services/platform-api/src/main/java/com/agentcrossing/platform/application/invocation/AgentExecutionRequest.java | services/agent-runtime/src/agent_runtime/contracts/models.py (class AgentExecutionRequest)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocationId", "userId", "taskId", "traceId", "agentId", "context"],
+      "properties": {
+        "invocationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "traceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "context": {
+          "type": "string"
+        },
+        "callbackBaseUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "providerSessionId": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "contextPack": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incrementalChatMessages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["messageId", "role", "content", "createdAt"],
+                "properties": {
+                  "messageId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": ["user", "assistant", "system"]
+                  },
+                  "agentId": {
+                    "type": ["string", "null"]
+                  },
+                  "taskId": {
+                    "type": ["string", "null"]
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "AgentExecutionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messages"],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "agent-message.schema.json"
+          }
+        }
+      }
+    }
+  }
+}

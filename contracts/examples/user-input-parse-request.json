@@ -1,0 +1,19 @@
+{
+  "input": "先让@opencode 分析需求，然后让@claude-code 复核方案",
+  "availableAgents": [
+    {
+      "agentId": "opencode",
+      "displayName": "OpenCode",
+      "role": "CLI coding agent",
+      "capabilities": ["code reasoning", "implementation"],
+      "tools": ["filesystem", "shell"]
+    },
+    {
+      "agentId": "claude-code",
+      "displayName": "ClaudeCode",
+      "role": "Code review and implementation agent",
+      "capabilities": ["code review", "implementation"],
+      "tools": ["filesystem", "shell"]
+    }
+  ]
+}

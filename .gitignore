@@ -1,0 +1,55 @@
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+
+# Local AI tooling
+.agents/
+.codex/
+.claude/settings.local.json
+skills-lock.json
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Java / Gradle
+.gradle/
+build/
+out/
+target/
+
+# JavaScript / Next.js
+node_modules/
+.next/
+.next.stale-*/
+coverage/
+*.tsbuildinfo
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+*.egg-info/
+services/agent-runtime/src/**/__pycache__/
+services/agent-runtime/src/**/*.py[cod]
+services/agent-runtime/src/*.egg-info/
+
+# Logs
+*.log
+logs/
+
+# Runtime artifacts
+tmp/
+run/
+
+# Local planning specs
+spec/

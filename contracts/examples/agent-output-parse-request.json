@@ -1,0 +1,7 @@
+{
+  "sourceTaskId": "task-analyze",
+  "sourceAgentId": "opencode",
+  "output": "@claude-code 请复核这个方案\n普通说明行不会生成任务\n@opencode 继续补充边界条件",
+  "availableAgentIds": ["opencode", "claude-code"]
+}
+
