@@ -45,6 +45,11 @@ public class MybatisInvocationRepository implements InvocationRepository {
     }
 
     @Override
+    public List<Invocation> findByTraceIdAndUserId(String traceId, String userId) {
+        return invocationMapper.findByTraceIdAndUserId(traceId, userId);
+    }
+
+    @Override
     public List<Invocation> findRunningByAgentId(String agentId) {
         return invocationMapper.findRunningByAgentId(agentId, InvocationStatus.RUNNING.name());
     }
@@ -61,6 +66,11 @@ public class MybatisInvocationRepository implements InvocationRepository {
         Invocation updated = existing.withStatus(status);
         invocationMapper.upsert(updated);
         return updated;
+    }
+
+    @Override
+    public void deleteByTraceIdAndUserId(String traceId, String userId) {
+        invocationMapper.deleteByTraceIdAndUserId(traceId, userId);
     }
 
     @Override

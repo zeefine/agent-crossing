@@ -43,4 +43,9 @@
             provider_session_id = VALUES(provider_session_id),
             updated_at = VALUES(updated_at)
     </insert>
+
+    <delete id="deleteByThreadId">
+        DELETE FROM agent_session
+        WHERE user_id = #{userId} AND thread_id = #{threadId}
+    </delete>
 </mapper>

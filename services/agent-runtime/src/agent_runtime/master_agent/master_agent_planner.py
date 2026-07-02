@@ -382,13 +382,49 @@ class MasterAgentPlanner:
         return accepted
 
     @staticmethod
+    def _requires_agent_self_orchestration(input_text: str) -> bool:
+        normalized = input_text.lower().replace(" ", "")
+        return (
+            "互相@" in normalized
+            or ("互相" in normalized and any(keyword in normalized for keyword in ("讨论", "互动", "对话")))
+            or "轮流" in normalized
+            or "每轮" in normalized
+            or "接力" in normalized
+            or "你不要干预" in normalized
+            or "不要干预" in normalized
+            or "双方各进行" in normalized
+        )
+
+    @staticmethod
+    def _seed_only_for_self_orchestration(tasks: list[ParsedTask], request: UserInputParseRequest) -> list[ParsedTask]:
+        if len(tasks) <= 1 or not MasterAgentPlanner._requires_agent_self_orchestration(request.input):
+            return tasks
+
+        seed_task = next((task for task in tasks if not task.depends_on), tasks[0])
+        return [
+            seed_task.model_copy(
+                update={
+                    "depends_on": [],
+                    "context": (
+                        f"{seed_task.context}\n\n"
+                        "执行约束：这是一个多 agent 自组织互动任务。你只负责当前轮次；"
+                        "如果需要继续互动，请在完成当前回复后只创建一个下一跳任务，"
+                        "不要一次性创建剩余轮次或完整 DAG。"
+                    ),
+                }
+            )
+        ]
+
+    @staticmethod
     def _to_response(
         planning_result: PlanningResult,
         request: UserInputParseRequest,
         provider_session_id: str | None = None,
     ) -> UserInputParseResponse:
+        tasks = MasterAgentPlanner._to_parsed_tasks(planning_result.tasks, request)
+        tasks = MasterAgentPlanner._seed_only_for_self_orchestration(tasks, request)
         return UserInputParseResponse(
-            tasks=MasterAgentPlanner._to_parsed_tasks(planning_result.tasks, request),
+            tasks=tasks,
             directAnswer=planning_result.direct_answer,
             providerSessionId=provider_session_id,
         )

@@ -180,11 +180,30 @@ class ClaudeCodeProvider(BaseProvider):
             args.extend(["--resume", request.provider_session_id])
         if settings.claudecode_model:
             args.extend(["--model", settings.claudecode_model])
-        if settings.claudecode_mcp_config_json:
-            args.extend(["--mcp-config", settings.claudecode_mcp_config_json])
+        mcp_config_json = self._mcp_config_json()
+        if mcp_config_json:
+            args.extend(["--mcp-config", mcp_config_json])
         if settings.claudecode_extra_args:
             args.extend(shlex.split(settings.claudecode_extra_args))
         return args
+
+    @staticmethod
+    def _mcp_config_json() -> str | None:
+        if settings.claudecode_mcp_config_json:
+            return settings.claudecode_mcp_config_json
+        if not settings.master_agent_mcp_url:
+            return None
+        return json.dumps(
+            {
+                "mcpServers": {
+                    "agent-crossing": {
+                        "type": "http",
+                        "url": settings.master_agent_mcp_url,
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
 
     def _stdout_to_messages(
         self,

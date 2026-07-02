@@ -6,4 +6,6 @@ public interface AgentContextCursorRepository {
     Optional<AgentContextCursor> find(String userId, String threadId, String agentId);
 
     AgentContextCursor save(AgentContextCursor cursor);
+
+    void deleteByThreadId(String userId, String threadId);
 }

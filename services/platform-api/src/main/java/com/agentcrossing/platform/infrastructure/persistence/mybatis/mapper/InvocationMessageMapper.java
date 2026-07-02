@@ -14,4 +14,6 @@ public interface InvocationMessageMapper {
     List<InvocationMessage> findByTraceId(@Param("traceId") String traceId);
 
     List<InvocationMessage> findByTraceIdAndUserId(@Param("traceId") String traceId, @Param("userId") String userId);
+
+    void deleteByTraceIdAndUserId(@Param("traceId") String traceId, @Param("userId") String userId);
 }

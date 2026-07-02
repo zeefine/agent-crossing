@@ -26,4 +26,9 @@ public class MybatisAgentContextCursorRepository implements AgentContextCursorRe
         agentContextCursorMapper.upsert(cursor);
         return cursor;
     }
+
+    @Override
+    public void deleteByThreadId(String userId, String threadId) {
+        agentContextCursorMapper.deleteByThreadId(userId, threadId);
+    }
 }

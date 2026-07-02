@@ -36,4 +36,9 @@ public class MybatisInvocationMessageRepository implements InvocationMessageRepo
     public List<InvocationMessage> findByTraceIdAndUserId(String traceId, String userId) {
         return invocationMessageMapper.findByTraceIdAndUserId(traceId, userId);
     }
+
+    @Override
+    public void deleteByTraceIdAndUserId(String traceId, String userId) {
+        invocationMessageMapper.deleteByTraceIdAndUserId(traceId, userId);
+    }
 }

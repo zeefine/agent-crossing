@@ -25,6 +25,11 @@ public class InMemoryAgentSessionRepository implements AgentSessionRepository {
         return session;
     }
 
+    @Override
+    public void deleteByThreadId(String userId, String threadId) {
+        sessions.values().removeIf(session -> session.userId().equals(userId) && session.threadId().equals(threadId));
+    }
+
     private static String key(String userId, String threadId, String agentId, String provider) {
         return userId + "\n" + threadId + "\n" + agentId + "\n" + provider;
     }

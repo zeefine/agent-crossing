@@ -22,4 +22,6 @@ public interface TaskMapper {
     List<Task> findByStatusAndUserId(@Param("status") String status, @Param("userId") String userId);
 
     List<Task> findAll();
+
+    void deleteByTraceIdAndUserId(@Param("traceId") String traceId, @Param("userId") String userId);
 }

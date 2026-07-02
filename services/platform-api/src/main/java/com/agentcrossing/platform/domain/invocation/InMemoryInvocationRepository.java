@@ -46,6 +46,14 @@ public class InMemoryInvocationRepository implements InvocationRepository {
     }
 
     @Override
+    public List<Invocation> findByTraceIdAndUserId(String traceId, String userId) {
+        return invocations.values().stream()
+                .filter(invocation -> invocation.traceId().equals(traceId) && invocation.userId().equals(userId))
+                .sorted(Comparator.comparing(Invocation::createdAt).thenComparing(Invocation::invocationId))
+                .toList();
+    }
+
+    @Override
     public List<Invocation> findRunningByAgentId(String agentId) {
         return invocations.values().stream()
                 .filter(invocation -> invocation.agentId().equals(agentId))
@@ -72,6 +80,12 @@ public class InMemoryInvocationRepository implements InvocationRepository {
             }
             return existing.withStatus(status);
         });
+    }
+
+    @Override
+    public void deleteByTraceIdAndUserId(String traceId, String userId) {
+        invocations.values().removeIf(invocation -> invocation.traceId().equals(traceId)
+                && invocation.userId().equals(userId));
     }
 
     @Override

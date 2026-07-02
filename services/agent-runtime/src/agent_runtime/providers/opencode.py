@@ -432,31 +432,14 @@ class OpenCodeProvider(BaseProvider):
         if not command:
             return None
         try:
-            return_code, stdout, _ = await self._run_command_with_timeout(command)
+            return_code, stdout, _ = await self._run_pty_command_with_timeout(command)
         except (FileNotFoundError, TimeoutError):
             return None
         if return_code not in (0, None):
             return None
         return self._extract_latest_session_id_from_list(stdout.decode("utf-8", errors="replace"))
 
-    async def _run_command_with_timeout(self, command: list[str]) -> tuple[int | None, bytes, bytes]:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy(),
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout_seconds)
-            return process.returncode, stdout, stderr
-        except TimeoutError:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            raise
-
-    async def _run_export_command_with_timeout(self, command: list[str]) -> tuple[int | None, bytes, bytes]:
+    async def _run_pty_command_with_timeout(self, command: list[str]) -> tuple[int | None, bytes, bytes]:
         master_fd, slave_fd = pty.openpty()
         process: asyncio.subprocess.Process | None = None
         try:
@@ -470,7 +453,7 @@ class OpenCodeProvider(BaseProvider):
             os.close(slave_fd)
             slave_fd = -1
             return await asyncio.wait_for(
-                self._collect_export_pty_output(process, master_fd),
+                self._collect_pty_command_output(process, master_fd),
                 timeout=self._timeout_seconds,
             )
         except TimeoutError:
@@ -483,7 +466,7 @@ class OpenCodeProvider(BaseProvider):
                 os.close(slave_fd)
             os.close(master_fd)
 
-    async def _collect_export_pty_output(
+    async def _collect_pty_command_output(
         self,
         process: asyncio.subprocess.Process,
         master_fd: int,
@@ -514,7 +497,7 @@ class OpenCodeProvider(BaseProvider):
         if not command:
             return None
         try:
-            return_code, stdout, _ = await self._run_export_command_with_timeout(command)
+            return_code, stdout, _ = await self._run_pty_command_with_timeout(command)
         except (FileNotFoundError, TimeoutError):
             return None
         if return_code not in (0, None):
@@ -553,7 +536,7 @@ class OpenCodeProvider(BaseProvider):
         for attempt in range(1, self._SESSION_EXPORT_ATTEMPTS + 1):
             diagnostics["attempts"] = attempt
             try:
-                return_code, stdout, stderr = await self._run_export_command_with_timeout(command)
+                return_code, stdout, stderr = await self._run_pty_command_with_timeout(command)
             except FileNotFoundError:
                 diagnostics["reason"] = "export_command_not_found"
                 return None

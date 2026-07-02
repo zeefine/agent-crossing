@@ -80,4 +80,9 @@
         SELECT * FROM task
         ORDER BY created_at ASC, task_id ASC
     </select>
+
+    <delete id="deleteByTraceIdAndUserId">
+        DELETE FROM task
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+    </delete>
 </mapper>

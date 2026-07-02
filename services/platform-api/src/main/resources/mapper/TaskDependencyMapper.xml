@@ -25,4 +25,16 @@
         ORDER BY child_task_id ASC
     </select>
 
+    <delete id="deleteByTaskIds">
+        DELETE FROM task_dependency
+        WHERE parent_task_id IN
+        <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+            #{taskId}
+        </foreach>
+        OR child_task_id IN
+        <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+            #{taskId}
+        </foreach>
+    </delete>
+
 </mapper>

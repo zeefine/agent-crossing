@@ -8,6 +8,7 @@ Format follows a product-engineering changelog style: each version includes impl
 
 ### Added
 
+- Added `docs/opencode-provider-lessons.md`, documenting the verified OpenCode CLI parsing/session-reuse pitfalls, incorrect assumptions, and future debugging checklist (2026-07-02).
 - Added a small animated `正在处理中...` indicator in the web chat timeline while the system is waiting for agent output (2026-06-25).
 - Added mirrored `MODEL_SYNC(ChatMessage)` comments across Java domain, Java DTO, frontend API type, MySQL schema, and MyBatis mapper to prevent future `ChatMessage` field drift.
 - Added a dedicated Java `DagValidator` (2026-06-24) for parsed task plans, covering cycle detection, orphan warnings, and redundant dependency edge detection before task enqueue.
@@ -21,6 +22,11 @@ Format follows a product-engineering changelog style: each version includes impl
 
 ### Changed
 
+- Changed chat thread deletion into a thread/trace scoped cleanup path: deleting a conversation now cancels active queued/running work, removes queued task ids from QuestHub, and deletes related invocation messages, invocations, task dependencies, tasks, agent context cursors, provider sessions, chat messages, realtime events, and the chat thread itself (2026-07-02).
+- Changed OpenCode `session list` discovery to use PTY capture, matching `run`/`export` terminal behavior and reducing missed provider session ids after first-run execution (2026-07-02).
+- Added startup stale-work cleanup: when platform-api starts, leftover queued/running invocations, queued/processing tasks, and affected running threads from a previous shutdown are marked `failed` instead of being recovered or left permanently processing (2026-07-02).
+- Changed MasterAgent planning for self-orchestrated multi-agent interactions: requests that ask agents to mutually @, take turns, or continue dialogue now seed only the first task, while business agents are instructed to append at most one next-hop task per turn to avoid duplicate preplanned DAG nodes (2026-07-02).
+- Fixed business ClaudeCode MCP wiring by defaulting its `--mcp-config` to the platform HTTP MCP endpoint when no dedicated `AGENT_RUNTIME_CLAUDECODE_MCP_CONFIG_JSON` override is set, allowing `get_task_status_snapshot` and `create_tasks` to be available during task execution (2026-07-02).
 - Hardened provider session reuse so invocation execution resolves the owning `threadId` once and skips `agent_session` lookup/save when a task has become orphaned after thread deletion, preventing successful provider runs from failing during session persistence (2026-07-01).
 - Replaced example MySQL credentials and default password fallbacks with placeholders/empty defaults in `.env.example`, `README.md`, and MySQL configuration (2026-07-01).
 - Cleaned Python generated artifacts from `services/agent-runtime/src` (`__pycache__`, `*.pyc`, and `agent_crossing_agent_runtime.egg-info`) and added explicit ignore rules so stale cache files such as the old `opencode_planner` bytecode no longer pollute search or review results (2026-07-01).

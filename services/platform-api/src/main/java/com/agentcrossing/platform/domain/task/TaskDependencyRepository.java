@@ -9,4 +9,6 @@ public interface TaskDependencyRepository {
     List<String> findParentTaskIds(String childTaskId);
 
     List<String> findChildTaskIds(String parentTaskId);
+
+    void deleteByTaskIds(Collection<String> taskIds);
 }

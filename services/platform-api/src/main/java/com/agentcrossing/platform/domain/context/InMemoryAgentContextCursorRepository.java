@@ -22,6 +22,11 @@ public class InMemoryAgentContextCursorRepository implements AgentContextCursorR
         return cursor;
     }
 
+    @Override
+    public void deleteByThreadId(String userId, String threadId) {
+        cursors.values().removeIf(cursor -> cursor.userId().equals(userId) && cursor.threadId().equals(threadId));
+    }
+
     private static String key(String userId, String threadId, String agentId) {
         return userId + "\n" + threadId + "\n" + agentId;
     }

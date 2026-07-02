@@ -41,4 +41,10 @@ public class InMemoryInvocationMessageRepository implements InvocationMessageRep
                 .sorted(Comparator.comparing(InvocationMessage::createdAt).thenComparing(InvocationMessage::messageId))
                 .toList();
     }
+
+    @Override
+    public void deleteByTraceIdAndUserId(String traceId, String userId) {
+        messages.values().removeIf(message -> message.traceId().equals(traceId)
+                && message.userId().equals(userId));
+    }
 }

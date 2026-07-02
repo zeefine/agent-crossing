@@ -72,6 +72,11 @@ public class InMemoryTaskRepository implements TaskRepository {
     }
 
     @Override
+    public void deleteByTraceIdAndUserId(String traceId, String userId) {
+        tasks.values().removeIf(task -> task.traceId().equals(traceId) && task.userId().equals(userId));
+    }
+
+    @Override
     public List<Task> findAll() {
         return tasks.values().stream()
                 .sorted(Comparator.comparing(Task::createdAt).thenComparing(Task::taskId))

@@ -63,6 +63,11 @@ public class MybatisTaskRepository implements TaskRepository {
     }
 
     @Override
+    public void deleteByTraceIdAndUserId(String traceId, String userId) {
+        taskMapper.deleteByTraceIdAndUserId(traceId, userId);
+    }
+
+    @Override
     public List<Task> findAll() {
         return taskMapper.findAll();
     }

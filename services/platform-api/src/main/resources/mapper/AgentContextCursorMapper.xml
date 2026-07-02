@@ -38,4 +38,9 @@
             last_injected_message_id = VALUES(last_injected_message_id),
             updated_at = VALUES(updated_at)
     </insert>
+
+    <delete id="deleteByThreadId">
+        DELETE FROM agent_context_cursor
+        WHERE user_id = #{userId} AND thread_id = #{threadId}
+    </delete>
 </mapper>

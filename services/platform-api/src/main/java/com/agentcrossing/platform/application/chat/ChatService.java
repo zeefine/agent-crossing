@@ -4,14 +4,25 @@ import com.agentcrossing.platform.application.realtime.RealtimeEventTypes;
 import com.agentcrossing.platform.application.parser.QuestParserService;
 import com.agentcrossing.platform.application.parser.UserInputEnqueueResult;
 import com.agentcrossing.platform.application.parser.UserInputParseResult;
+import com.agentcrossing.platform.domain.context.AgentContextCursorRepository;
 import com.agentcrossing.platform.domain.chat.ChatThread;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
 import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
 import com.agentcrossing.platform.domain.event.EventLogRepository;
+import com.agentcrossing.platform.domain.invocation.Invocation;
+import com.agentcrossing.platform.domain.invocation.InvocationRepository;
+import com.agentcrossing.platform.domain.invocation.InvocationStatus;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
+import com.agentcrossing.platform.domain.message.InvocationMessageRepository;
+import com.agentcrossing.platform.domain.queue.QuestHub;
+import com.agentcrossing.platform.domain.session.AgentSessionRepository;
+import com.agentcrossing.platform.domain.task.Task;
+import com.agentcrossing.platform.domain.task.TaskDependencyRepository;
+import com.agentcrossing.platform.domain.task.TaskRepository;
+import com.agentcrossing.platform.domain.task.TaskStatus;
 import com.agentcrossing.platform.domain.user.UserRepository;
 import java.time.Instant;
 import java.util.List;
@@ -41,6 +52,13 @@ public class ChatService {
     private final ChatEventService chatEventService;
     private final EventLogRepository eventLogRepository;
     private final UserRepository userRepository;
+    private final InvocationMessageRepository invocationMessageRepository;
+    private final InvocationRepository invocationRepository;
+    private final TaskRepository taskRepository;
+    private final TaskDependencyRepository taskDependencyRepository;
+    private final AgentContextCursorRepository agentContextCursorRepository;
+    private final AgentSessionRepository agentSessionRepository;
+    private final QuestHub questHub;
     private final Executor chatPlanningExecutor;
     private final TransactionTemplate transactionTemplate;
 
@@ -48,7 +66,22 @@ public class ChatService {
             ChatThreadRepository chatThreadRepository,
             ChatMessageRepository chatMessageRepository,
             QuestParserService questParserService) {
-        this(chatThreadRepository, chatMessageRepository, questParserService, null, null, null, Runnable::run, (TransactionTemplate) null);
+        this(
+                chatThreadRepository,
+                chatMessageRepository,
+                questParserService,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Runnable::run,
+                (TransactionTemplate) null);
     }
 
     public ChatService(
@@ -56,7 +89,22 @@ public class ChatService {
             ChatMessageRepository chatMessageRepository,
             QuestParserService questParserService,
             ChatEventService chatEventService) {
-        this(chatThreadRepository, chatMessageRepository, questParserService, chatEventService, null, null, Runnable::run, (TransactionTemplate) null);
+        this(
+                chatThreadRepository,
+                chatMessageRepository,
+                questParserService,
+                chatEventService,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Runnable::run,
+                (TransactionTemplate) null);
     }
 
     @Autowired
@@ -67,6 +115,13 @@ public class ChatService {
             ChatEventService chatEventService,
             EventLogRepository eventLogRepository,
             UserRepository userRepository,
+            InvocationMessageRepository invocationMessageRepository,
+            InvocationRepository invocationRepository,
+            TaskRepository taskRepository,
+            TaskDependencyRepository taskDependencyRepository,
+            AgentContextCursorRepository agentContextCursorRepository,
+            AgentSessionRepository agentSessionRepository,
+            QuestHub questHub,
             @Qualifier("chatPlanningExecutor") Executor chatPlanningExecutor,
             ObjectProvider<PlatformTransactionManager> transactionManagerProvider) {
         this(
@@ -76,19 +131,33 @@ public class ChatService {
                 chatEventService,
                 eventLogRepository,
                 userRepository,
+                invocationMessageRepository,
+                invocationRepository,
+                taskRepository,
+                taskDependencyRepository,
+                agentContextCursorRepository,
+                agentSessionRepository,
+                questHub,
                 chatPlanningExecutor,
                 transactionManagerProvider.getIfAvailable() == null
                         ? null
                         : new TransactionTemplate(transactionManagerProvider.getIfAvailable()));
     }
 
-    private ChatService(
+    ChatService(
             ChatThreadRepository chatThreadRepository,
             ChatMessageRepository chatMessageRepository,
             QuestParserService questParserService,
             ChatEventService chatEventService,
             EventLogRepository eventLogRepository,
             UserRepository userRepository,
+            InvocationMessageRepository invocationMessageRepository,
+            InvocationRepository invocationRepository,
+            TaskRepository taskRepository,
+            TaskDependencyRepository taskDependencyRepository,
+            AgentContextCursorRepository agentContextCursorRepository,
+            AgentSessionRepository agentSessionRepository,
+            QuestHub questHub,
             Executor chatPlanningExecutor,
             TransactionTemplate transactionTemplate) {
         this.chatThreadRepository = chatThreadRepository;
@@ -97,6 +166,13 @@ public class ChatService {
         this.chatEventService = chatEventService;
         this.eventLogRepository = eventLogRepository;
         this.userRepository = userRepository;
+        this.invocationMessageRepository = invocationMessageRepository;
+        this.invocationRepository = invocationRepository;
+        this.taskRepository = taskRepository;
+        this.taskDependencyRepository = taskDependencyRepository;
+        this.agentContextCursorRepository = agentContextCursorRepository;
+        this.agentSessionRepository = agentSessionRepository;
+        this.questHub = questHub;
         this.chatPlanningExecutor = chatPlanningExecutor;
         this.transactionTemplate = transactionTemplate;
     }
@@ -149,21 +225,69 @@ public class ChatService {
         return new ChatSubmitResult(thread, userMessage, null, List.of());
     }
 
+    @Transactional
     public void deleteThread(String userId, String threadId) {
         ChatThread thread = chatThreadRepository
                 .findByThreadIdAndUserId(threadId, userId)
                 .orElseThrow(() -> new IllegalArgumentException("Chat thread not found: " + threadId));
+        String traceId = thread.traceId();
+        List<Task> traceTasks = taskRepository == null
+                ? List.of()
+                : taskRepository.findByTraceIdAndUserId(traceId, userId);
+        List<String> traceTaskIds = traceTasks.stream().map(Task::taskId).toList();
+
+        markActiveWorkCanceled(traceTasks, traceId, userId);
+        removeQueuedTasks(traceTaskIds);
+
         // 先广播 threadDeleted 给当前的 WS 订阅者，让前端立刻把该线程从列表移除。
         // 这条事件本身会写一行 realtime_event；下面 eventLogRepository.deleteByThreadId
         // 会把它也一起清掉，但订阅者那时已经收到了。
         publishThreadDeleted(thread.threadId());
+
+        if (invocationMessageRepository != null) {
+            invocationMessageRepository.deleteByTraceIdAndUserId(traceId, userId);
+        }
+        if (invocationRepository != null) {
+            invocationRepository.deleteByTraceIdAndUserId(traceId, userId);
+        }
+        if (taskDependencyRepository != null) {
+            taskDependencyRepository.deleteByTaskIds(traceTaskIds);
+        }
+        if (taskRepository != null) {
+            taskRepository.deleteByTraceIdAndUserId(traceId, userId);
+        }
+        if (agentContextCursorRepository != null) {
+            agentContextCursorRepository.deleteByThreadId(userId, threadId);
+        }
+        if (agentSessionRepository != null) {
+            agentSessionRepository.deleteByThreadId(userId, threadId);
+        }
         chatMessageRepository.deleteByThreadId(threadId);
-        chatThreadRepository.deleteByThreadId(threadId);
         if (eventLogRepository != null) {
             eventLogRepository.deleteByThreadId(threadId);
         }
-        // task / invocation / invocation_message 不级联删：它们以 traceId 为主键，
-        // 孤立后已有的 null-safe 查询 (findByTraceId.ifPresent) 会正确 no-op。
+        chatThreadRepository.deleteByThreadId(threadId);
+    }
+
+    private void markActiveWorkCanceled(List<Task> traceTasks, String traceId, String userId) {
+        traceTasks.stream()
+                .filter(task -> task.status() == TaskStatus.QUEUED || task.status() == TaskStatus.PROCESSING)
+                .forEach(task -> taskRepository.updateStatus(task.taskId(), TaskStatus.CANCELED));
+        if (invocationRepository == null) {
+            return;
+        }
+        invocationRepository.findByTraceIdAndUserId(traceId, userId).stream()
+                .filter(invocation -> invocation.status() == InvocationStatus.QUEUED
+                        || invocation.status() == InvocationStatus.RUNNING)
+                .map(Invocation::invocationId)
+                .forEach(invocationId -> invocationRepository.updateStatus(invocationId, InvocationStatus.CANCELED));
+    }
+
+    private void removeQueuedTasks(List<String> taskIds) {
+        if (questHub == null) {
+            return;
+        }
+        taskIds.forEach(questHub::remove);
     }
 
     private void ensureUser(String userId) {

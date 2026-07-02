@@ -33,4 +33,11 @@ public class MybatisTaskDependencyRepository implements TaskDependencyRepository
     public List<String> findChildTaskIds(String parentTaskId) {
         return taskDependencyMapper.findChildTaskIds(parentTaskId);
     }
+
+    @Override
+    public void deleteByTaskIds(Collection<String> taskIds) {
+        if (!taskIds.isEmpty()) {
+            taskDependencyMapper.deleteByTaskIds(List.copyOf(taskIds));
+        }
+    }
 }

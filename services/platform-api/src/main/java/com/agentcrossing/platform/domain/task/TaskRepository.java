@@ -20,5 +20,7 @@ public interface TaskRepository {
 
     Task updateStatus(String taskId, TaskStatus status);
 
+    void deleteByTraceIdAndUserId(String traceId, String userId);
+
     List<Task> findAll();
 }

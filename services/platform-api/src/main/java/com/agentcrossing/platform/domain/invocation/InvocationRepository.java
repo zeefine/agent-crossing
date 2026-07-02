@@ -14,11 +14,15 @@ public interface InvocationRepository {
 
     List<Invocation> findByTaskIdAndUserId(String taskId, String userId);
 
+    List<Invocation> findByTraceIdAndUserId(String traceId, String userId);
+
     List<Invocation> findRunningByAgentId(String agentId);
 
     List<Invocation> findRunningByAgentIdAndUserId(String agentId, String userId);
 
     Invocation updateStatus(String invocationId, InvocationStatus status);
+
+    void deleteByTraceIdAndUserId(String traceId, String userId);
 
     List<Invocation> findAll();
 }

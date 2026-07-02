@@ -62,4 +62,9 @@
         WHERE trace_id = #{traceId} AND user_id = #{userId}
         ORDER BY created_at ASC, message_id ASC
     </select>
+
+    <delete id="deleteByTraceIdAndUserId">
+        DELETE FROM invocation_message
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+    </delete>
 </mapper>

@@ -227,6 +227,40 @@ def test_claudecode_provider_passes_mcp_config_json_as_single_argument(
     assert command[command.index("--mcp-config") + 1] == mcp_config
 
 
+def test_claudecode_provider_defaults_to_platform_http_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "claudecode_mcp_config_json", None)
+    monkeypatch.setattr(settings, "master_agent_mcp_url", "http://127.0.0.1:8090/mcp/master-agent/")
+    script = tmp_path / "fake_claude_default_mcp.py"
+    command_log = tmp_path / "commands.jsonl"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                f"log_path = pathlib.Path({str(command_log)!r})",
+                "with log_path.open('a', encoding='utf-8') as log:",
+                "    log.write(json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')",
+                "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'ok'}]}}))",
+            ]
+        )
+    )
+    provider = ClaudeCodeProvider(command=f"{sys.executable} {script}")
+    request = execution_request().model_copy(update={"agent_id": "claudecode"})
+
+    asyncio.run(provider.execute(request))
+
+    command = json.loads(command_log.read_text(encoding="utf-8").splitlines()[0])
+    mcp_config = json.loads(command[command.index("--mcp-config") + 1])
+    assert mcp_config["mcpServers"]["agent-crossing"] == {
+        "type": "http",
+        "url": "http://127.0.0.1:8090/mcp/master-agent/",
+    }
+
+
 def test_claudecode_provider_parses_result_error() -> None:
     provider = ClaudeCodeProvider(
         command=(
@@ -443,6 +477,18 @@ def test_opencode_provider_reads_static_prompt_from_config(
 
     assert prompt.startswith("Custom opencode static prompt.\n\n[Invocation Context]")
     assert "Task:\nhello" in prompt
+
+
+def test_business_agent_prompt_limits_multi_turn_collaboration_to_next_hop() -> None:
+    opencode_prompt = OpenCodeProvider._build_prompt(execution_request())
+    claudecode_prompt = ClaudeCodeProvider._build_prompt(
+        execution_request().model_copy(update={"agent_id": "claudecode"})
+    )
+
+    assert "每次最多只创建一个下一跳任务" in opencode_prompt
+    assert "不要一次性预生成剩余轮次或完整 DAG" in opencode_prompt
+    assert "每次最多只创建一个下一跳任务" in claudecode_prompt
+    assert "不要一次性预生成剩余轮次或完整 DAG" in claudecode_prompt
 
 
 def test_business_agent_static_prompt_falls_back_to_default(

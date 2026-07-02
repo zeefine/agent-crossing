@@ -29,4 +29,9 @@ public class MybatisAgentSessionRepository implements AgentSessionRepository {
         agentSessionMapper.upsert(session);
         return session;
     }
+
+    @Override
+    public void deleteByThreadId(String userId, String threadId) {
+        agentSessionMapper.deleteByThreadId(userId, threadId);
+    }
 }

@@ -13,7 +13,7 @@ from agent_runtime.master_agent.models import CreateTasksResult, PlannedTask, Ta
 from agent_runtime.master_agent.mcp_server import master_agent_mcp
 from agent_runtime.master_agent import mcp_server
 from agent_runtime.master_agent.master_agent_planner import MasterAgentPlanner
-from agent_runtime.master_agent.planning_sessions import PlanningSessionStore, planning_session_store
+from agent_runtime.master_agent.planning_sessions import PlanningResult, PlanningSessionStore, planning_session_store
 from agent_runtime.main import create_app
 
 
@@ -43,6 +43,7 @@ def test_master_agent_prompt_places_static_rules_before_dynamic_context() -> Non
         "For ordinary questions, short explanations, simple Q&A"
     )
     assert "Do not call submit_direct_answer for explicit @agentId input" in prompt
+    assert "Submit exactly one seed task to the first mentioned suitable agent" in prompt
     assert prompt.index("submit_direct_answer") < prompt.index(
         "For complex work that clearly needs multiple steps"
     )
@@ -75,6 +76,41 @@ def test_master_agent_reads_static_prompt_from_config(
 
     assert prompt.startswith("Custom master static prompt.\n\n[Planning Context]")
     assert prompt.rstrip().endswith("分析当前项目")
+
+
+def test_master_agent_collapses_self_orchestrated_dialogue_to_seed_task() -> None:
+    request = UserInputParseRequest(
+        input="让claudecode和opencode互相@讨论 AI替代程序员的可能性，每轮不超过200字，你不要干预。",
+        availableAgents=[agent_card("claudecode"), agent_card("opencode")],
+    )
+    planning_result = PlanningResult(
+        tasks=[
+            PlannedTask(
+                taskId="task-seed",
+                agentId="claudecode",
+                context="请开始第一轮观点，并按需创建下一跳任务。",
+                dependsOn=[],
+            ),
+            PlannedTask(
+                taskId="task-opencode-reply",
+                agentId="opencode",
+                context="请回复 ClaudeCode 的观点。",
+                dependsOn=["task-seed"],
+            ),
+            PlannedTask(
+                taskId="task-claude-reply",
+                agentId="claudecode",
+                context="请继续第二轮回复。",
+                dependsOn=["task-opencode-reply"],
+            ),
+        ]
+    )
+
+    response = MasterAgentPlanner._to_response(planning_result, request)
+
+    assert [task.task_id for task in response.tasks] == ["task-seed"]
+    assert response.tasks[0].depends_on == []
+    assert "只创建一个下一跳任务" in response.tasks[0].context
 
 
 def test_master_agent_builds_claudecode_command_with_mcp_config(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -62,6 +62,12 @@
         ORDER BY created_at ASC, invocation_id ASC
     </select>
 
+    <select id="findByTraceIdAndUserId" resultMap="InvocationResultMap">
+        SELECT * FROM invocation
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+        ORDER BY created_at ASC, invocation_id ASC
+    </select>
+
     <select id="findRunningByAgentId" resultMap="InvocationResultMap">
         SELECT * FROM invocation
         WHERE agent_id = #{agentId} AND status = #{status}
@@ -78,4 +84,9 @@
         SELECT * FROM invocation
         ORDER BY created_at ASC, invocation_id ASC
     </select>
+
+    <delete id="deleteByTraceIdAndUserId">
+        DELETE FROM invocation
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+    </delete>
 </mapper>

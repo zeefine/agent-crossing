@@ -34,4 +34,13 @@ public class InMemoryTaskDependencyRepository implements TaskDependencyRepositor
                 .sorted()
                 .toList();
     }
+
+    @Override
+    public void deleteByTaskIds(Collection<String> taskIds) {
+        if (taskIds.isEmpty()) {
+            return;
+        }
+        dependencies.removeIf(dependency -> taskIds.contains(dependency.parentTaskId())
+                || taskIds.contains(dependency.childTaskId()));
+    }
 }

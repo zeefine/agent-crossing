@@ -12,4 +12,6 @@ public interface TaskDependencyMapper {
     List<String> findParentTaskIds(@Param("childTaskId") String childTaskId);
 
     List<String> findChildTaskIds(@Param("parentTaskId") String parentTaskId);
+
+    void deleteByTaskIds(@Param("taskIds") List<String> taskIds);
 }

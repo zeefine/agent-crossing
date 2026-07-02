@@ -12,4 +12,6 @@ public interface AgentContextCursorMapper {
             @Param("agentId") String agentId);
 
     void upsert(AgentContextCursor cursor);
+
+    void deleteByThreadId(@Param("userId") String userId, @Param("threadId") String threadId);
 }

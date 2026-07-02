@@ -17,10 +17,14 @@ public interface InvocationMapper {
 
     List<Invocation> findByTaskIdAndUserId(@Param("taskId") String taskId, @Param("userId") String userId);
 
+    List<Invocation> findByTraceIdAndUserId(@Param("traceId") String traceId, @Param("userId") String userId);
+
     List<Invocation> findRunningByAgentId(@Param("agentId") String agentId, @Param("status") String status);
 
     List<Invocation> findRunningByAgentIdAndUserId(
             @Param("agentId") String agentId, @Param("userId") String userId, @Param("status") String status);
 
     List<Invocation> findAll();
+
+    void deleteByTraceIdAndUserId(@Param("traceId") String traceId, @Param("userId") String userId);
 }

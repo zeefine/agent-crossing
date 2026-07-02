@@ -10,4 +10,6 @@ public interface InvocationMessageRepository {
     List<InvocationMessage> findByTraceId(String traceId);
 
     List<InvocationMessage> findByTraceIdAndUserId(String traceId, String userId);
+
+    void deleteByTraceIdAndUserId(String traceId, String userId);
 }

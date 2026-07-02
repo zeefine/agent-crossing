@@ -6,4 +6,6 @@ public interface AgentSessionRepository {
     Optional<AgentSession> findByThreadId(String userId, String threadId, String agentId, String provider);
 
     AgentSession save(AgentSession session);
+
+    void deleteByThreadId(String userId, String threadId);
 }
