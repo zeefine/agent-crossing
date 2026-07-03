@@ -53,7 +53,7 @@ class AcceptanceCriteriaTests {
     }
 
     @Test
-    void v1FlowRunsInMemoryFromUserInputToFollowUpTask() {
+    void v1FlowRunsInMemoryWithoutParsingNaturalLanguageFollowUpTasks() {
         TestHarness harness = new TestHarness(new FlowParserClient(), new StaticRuntimeClient("@opencode follow up"));
 
         List<String> submittedTaskIds = harness.taskController.submit("anonymous", new SubmitTaskRequest("start")).data().stream()
@@ -71,13 +71,8 @@ class AcceptanceCriteriaTests {
         assertThat(harness.invocationRepository.findAll())
                 .extracting(Invocation::status)
                 .containsExactly(InvocationStatus.SUCCEEDED);
-        assertThat(harness.questHub.snapshot()).containsExactly("task-follow-up");
-
-        Task followUp = harness.taskRepository.findByTaskId("task-follow-up").orElseThrow();
-        Task root = harness.taskRepository.findByTaskId("task-root").orElseThrow();
-        assertThat(followUp.traceId()).isEqualTo(root.traceId());
-        assertThat(followUp.createdByTaskId()).isEqualTo("task-root");
-        assertThat(followUp.depth()).isEqualTo(1);
+        assertThat(harness.questHub.snapshot()).isEmpty();
+        assertThat(harness.taskRepository.findByTaskId("task-follow-up")).isEmpty();
     }
 
     @Test
@@ -128,12 +123,18 @@ class AcceptanceCriteriaTests {
         harness.taskRepository.save(root);
         harness.taskRepository.save(depthTen);
 
-        assertThat(harness.parserService.parseAgentOutputAndEnqueue(depthTen, "@opencode too deep")).isEmpty();
+        assertThat(harness.parserService.appendAgentTasks(
+                depthTen,
+                List.of(new ParsedTask("too-deep", "opencode", "too deep", List.of()))))
+                .isEmpty();
 
         for (int index = 0; index < 9; index++) {
             harness.taskRepository.save(task("self-" + index, index + 1));
         }
-        assertThat(harness.parserService.parseAgentOutputAndEnqueue(root, "@opencode too many self triggers")).isEmpty();
+        assertThat(harness.parserService.appendAgentTasks(
+                root,
+                List.of(new ParsedTask("too-many-self-triggers", "opencode", "too many self triggers", List.of()))))
+                .isEmpty();
     }
 
     private static Task task(String taskId, int depth) {
@@ -234,13 +235,6 @@ class AcceptanceCriteriaTests {
                     List.of(new ParsedTask("task-root", "opencode", input, List.of())), null);
         }
 
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            if (output.contains("@opencode")) {
-                return List.of(new ParsedTask("task-follow-up", "opencode", "follow up", List.of()));
-            }
-            return List.of();
-        }
     }
 
     private static final class StaticRuntimeClient implements AgentRuntimeClient {

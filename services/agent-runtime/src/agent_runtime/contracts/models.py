@@ -74,17 +74,6 @@ class UserInputParseResponse(ContractModel):
     provider_session_id: str | None = Field(default=None, alias="providerSessionId")
 
 
-class AgentOutputParseRequest(ContractModel):
-    source_task_id: str = Field(alias="sourceTaskId")
-    source_agent_id: str = Field(alias="sourceAgentId")
-    output: str
-    available_agent_ids: list[str] = Field(alias="availableAgentIds")
-
-
-class AgentOutputParseResponse(ContractModel):
-    tasks: list[ParsedTask]
-
-
 class AgentMessageType(StrEnum):
     TEXT_DELTA = "textDelta"
     MESSAGE = "message"

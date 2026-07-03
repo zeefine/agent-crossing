@@ -1,6 +1,10 @@
+from typing import Annotated
+
+from pydantic import Field
 from fastmcp import FastMCP
 
 from agent_runtime.master_agent.models import (
+    AppendTask,
     CreateTasksResult,
     PlannedTask,
     SubmitDirectAnswerResult,
@@ -62,9 +66,18 @@ async def get_task_status_snapshot(
 
 @master_agent_mcp.tool()
 async def create_tasks(
-    sourceTaskId: str,
-    tasks: list[PlannedTask],
-    userId: str = "anonymous",
+    sourceTaskId: Annotated[str, Field(description="Current task id. New tasks are appended after this task.")],
+    tasks: Annotated[
+        list[AppendTask],
+        Field(
+            description=(
+                "New tasks to append. Each task.context must be short and self-contained; "
+                "do not include full conversation transcripts, tool outputs, JSON blocks, "
+                "or long quoted text. Conversation history is injected by the platform."
+            )
+        ),
+    ],
+    userId: Annotated[str, Field(description="Current user id from Invocation Context.")] = "anonymous",
 ) -> CreateTasksResult:
-    """Append new task nodes after sourceTaskId without modifying existing DAG nodes or edges."""
+    """Append concise new task nodes after sourceTaskId without modifying existing DAG nodes or edges."""
     return await task_status_client.create_tasks(sourceTaskId, tasks, userId)

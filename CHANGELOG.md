@@ -22,7 +22,18 @@ Format follows a product-engineering changelog style: each version includes impl
 
 ### Changed
 
+- Fixed duplicate ClaudeCode chat output by treating an existing assistant stream row as proof that callback streaming already persisted the invocation; final runtime responses now skip non-`DONE` messages in that case instead of appending the same text twice (2026-07-03).
+- Fixed ClaudeCode duplicate assistant snapshots at the provider layer: repeated `stream-json` assistant events are now de-duplicated, and cumulative snapshots only emit their new suffix before callback streaming (2026-07-03).
+- Added `agent_crossing_perf` timing logs across the slow-path investigation points: MasterAgent planning, task enqueue, router wait/drain, business-agent runtime, CLI startup, first provider output, OpenCode export recovery, and callback write-back (2026-07-03).
+- Filtered OpenCode's formatted plain terminal MCP status lines (`⚙ toolName {...}`) out of user-facing chat parsing, while keeping structured export text extraction limited to `type=text` parts (2026-07-03).
+- Stopped automatically parsing successful CLI agent natural-language output into follow-up tasks; business-agent task handoff now relies on MCP `create_tasks`, and thread completion now checks whether trace-scoped tasks remain queued or processing (2026-07-03).
+- Filtered OpenCode's formatted `Invalid Tool` terminal error blocks from user-facing chat parsing and tightened business-agent prompts to avoid exposing tool statuses, tool errors, or post-`create_tasks` progress summaries (2026-07-03).
+- Constrained business-agent `create_tasks` handoff payloads so `tasks[].context` stays concise and no longer copies full conversation history, long quoted text, tool output, or JSON blocks; platform-injected chat history is now the expected source for downstream context (2026-07-03).
+- Fixed OpenCode PTY helper reads so `opencode session list` can no longer hang the runtime request indefinitely; session-list recovery now uses a short bounded timeout instead of consuming the whole provider timeout, preventing completed-looking replies from leaving parent tasks stuck in `PROCESSING` and downstream tasks stuck in `QUEUED` (2026-07-03).
 - Changed chat thread deletion into a thread/trace scoped cleanup path: deleting a conversation now cancels active queued/running work, removes queued task ids from QuestHub, and deletes related invocation messages, invocations, task dependencies, tasks, agent context cursors, provider sessions, chat messages, realtime events, and the chat thread itself (2026-07-02).
+- Reorganized `docs/opencode-provider-lessons.md` into the same ops-checklist structure as `docs/mysql-mode-pitfalls.md`, including front matter, pitfall sections, review rules, debugging order, and long-term follow-ups (2026-07-02).
+- Added `AGENT_RUNTIME_CLI_WORKING_DIRECTORY` and wired OpenCode, ClaudeCode, and MasterAgent CLI subprocesses to run from `/Users/fine/PyProjects/agent-crossing` by default instead of inheriting the agent-runtime startup directory (2026-07-03).
+- Hardened provider subprocess environments by stripping any inherited `AGENT_CROSSING_CALLBACK_TOKEN`, preserving the v1 contract that CLI agents receive invocation identity but no callback token (2026-07-03).
 - Changed OpenCode `session list` discovery to use PTY capture, matching `run`/`export` terminal behavior and reducing missed provider session ids after first-run execution (2026-07-02).
 - Added startup stale-work cleanup: when platform-api starts, leftover queued/running invocations, queued/processing tasks, and affected running threads from a previous shutdown are marked `failed` instead of being recovered or left permanently processing (2026-07-02).
 - Changed MasterAgent planning for self-orchestrated multi-agent interactions: requests that ask agents to mutually @, take turns, or continue dialogue now seed only the first task, while business agents are instructed to append at most one next-hop task per turn to avoid duplicate preplanned DAG nodes (2026-07-02).
@@ -120,6 +131,10 @@ Format follows a product-engineering changelog style: each version includes impl
 - Changed the web right-side run panel (2026-06-24) from a linear Steps list to a current-thread DAG status view with dependency levels, upstream task references, downstream counts, and status summary.
 - Changed the web DAG panel (2026-06-24) to render tasks as clickable layer-based nodes; selecting a node expands task id, status, agent, dependencies, downstream count, creator, and full task context.
 
+### Removed
+
+- Removed the legacy agent-output parser path: platform-api no longer calls `/api/parser/agent-output`, callback messages no longer create tasks from text, and agent-runtime no longer exposes the agent-output parser route or models (2026-07-03).
+
 ### Fixed
 
 - Fixed MasterAgent ordinary Q&A failures when Claude Code emits assistant text on stdout but does not call the final `submit_direct_answer` MCP tool; stdout assistant text is now used as a direct-answer fallback with provider session capture preserved (2026-06-30).
@@ -144,7 +159,7 @@ Format follows a product-engineering changelog style: each version includes impl
 - Changed simple MasterAgent replies (2026-06-24): when no downstream task is required, MasterAgent now submits a direct answer that platform-api saves as an assistant `chat_message`; the frontend displays it without creating a task.
 - Improved chat attribution (2026-06-24): MasterAgent direct replies are now persisted with `agentId=masteragent`, and the web chat timeline visually distinguishes MasterAgent, OpenCode, and ClaudeCode messages.
 - Added explicit agent routing rule (2026-06-24): user inputs starting with `@agentId` must be planned as a single task for that available agent instead of being answered directly by MasterAgent.
-- Improved business-agent delegation fallback (2026-06-24): business prompts now require concise user-facing acknowledgements instead of JSON tool-call prose, and the agent-output parser can recover `create_tasks` JSON blocks into real follow-up tasks when an agent prints them.
+- Improved business-agent delegation prompts (2026-06-24): business prompts now require concise user-facing acknowledgements instead of JSON tool-call prose; follow-up task creation has since been consolidated onto MCP `create_tasks`.
 - Fixed OpenCode empty-reply handling (2026-06-24, later hardened): current runtime attempts session-scoped `opencode export <sessionId>` recovery when a concrete session id exists, and emits a silent-completion diagnostic only when recovery cannot find assistant text.
 
 ## [v1.1.0] - 2026-06-23

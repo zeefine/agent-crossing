@@ -97,44 +97,6 @@
           "type": ["string", "null"]
         }
       }
-    },
-    "AgentOutputParseRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["sourceTaskId", "sourceAgentId", "output", "availableAgentIds"],
-      "properties": {
-        "sourceTaskId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "sourceAgentId": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9_-]+$"
-        },
-        "output": {
-          "type": "string"
-        },
-        "availableAgentIds": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_-]+$"
-          }
-        }
-      }
-    },
-    "AgentOutputParseResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["tasks"],
-      "properties": {
-        "tasks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ParsedTask"
-          }
-        }
-      }
     }
   }
 }

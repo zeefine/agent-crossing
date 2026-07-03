@@ -20,6 +20,7 @@ import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
 import com.agentcrossing.platform.domain.message.InMemoryChatMessageRepository;
 import com.agentcrossing.platform.domain.message.InMemoryInvocationMessageRepository;
+import com.agentcrossing.platform.domain.message.InvocationMessage;
 import com.agentcrossing.platform.domain.queue.QuestHub;
 import com.agentcrossing.platform.domain.session.AgentSession;
 import com.agentcrossing.platform.domain.session.InMemoryAgentSessionRepository;
@@ -45,7 +46,7 @@ class InvocationServiceTests {
     private final InvocationService service = invocationService(runtimeClient, parserService(parserClient));
 
     @Test
-    void createsInvocationRunsRuntimeCompletesTaskAndParsesOutput() {
+    void createsInvocationRunsRuntimeAndDoesNotParseNaturalLanguageOutput() {
         Task task = task("task-1");
         taskRepository.save(task);
         runtimeClient.result = new AgentExecutionResult(List.of(new AgentMessage(
@@ -57,14 +58,13 @@ class InvocationServiceTests {
                 "@opencode follow up",
                 null,
                 Instant.now())));
-        parserClient.agentTasks = List.of(new ParsedTask("task-child", "opencode", "follow up", List.of()));
 
         Invocation invocation = service.execute(task);
 
         assertThat(invocation.status()).isEqualTo(InvocationStatus.SUCCEEDED);
         assertThat(invocation.taskId()).isEqualTo(task.taskId());
         assertThat(taskRepository.findByTaskId(task.taskId()).orElseThrow().status()).isEqualTo(TaskStatus.COMPLETED);
-        assertThat(questHub.snapshot()).containsExactly("task-child");
+        assertThat(questHub.snapshot()).isEmpty();
         assertThat(runtimeClient.lastRequest.invocationId()).isEqualTo(invocation.invocationId());
     }
 
@@ -131,7 +131,6 @@ class InvocationServiceTests {
                     assertThat(message.status()).isEqualTo(ChatMessageStatus.FAILED);
                     assertThat(message.content()).isEqualTo("runtime returned error");
                 });
-        assertThat(parserClient.parseAgentOutputCalls).isZero();
     }
 
     @Test
@@ -181,6 +180,127 @@ class InvocationServiceTests {
     }
 
     @Test
+    void doesNotAppendReturnedMessagesAgainWhenCallbackAlreadyStreamedAssistantMessage() {
+        InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
+        InMemoryChatMessageRepository messageRepository = new InMemoryChatMessageRepository();
+        InMemoryInvocationMessageRepository invocationMessageRepository = new InMemoryInvocationMessageRepository();
+        Instant now = Instant.now();
+        threadRepository.save(new ChatThread(
+                "thread-1",
+                "anonymous",
+                "thread",
+                ChatThreadStatus.RUNNING,
+                "trace-1",
+                now,
+                now));
+        Task task = task("task-streamed");
+        taskRepository.save(task);
+        AgentRuntimeClient callbackThenReturnSameMessage = request -> {
+            invocationMessageRepository.save(new InvocationMessage(
+                    "invocation-message-streamed",
+                    request.userId(),
+                    request.invocationId(),
+                    request.taskId(),
+                    request.traceId(),
+                    request.agentId(),
+                    AgentMessageType.MESSAGE,
+                    "claude streamed once",
+                    null,
+                    now));
+            messageRepository.save(new ChatMessage(
+                    "message-streamed",
+                    "thread-1",
+                    ChatMessageRole.ASSISTANT,
+                    "claude streamed once",
+                    ChatMessageStatus.STREAMING,
+                    request.invocationId(),
+                    request.taskId(),
+                    request.agentId(),
+                    now,
+                    now));
+            return new AgentExecutionResult(List.of(new AgentMessage(
+                    "returned",
+                    request.taskId(),
+                    request.traceId(),
+                    request.agentId(),
+                    AgentMessageType.MESSAGE,
+                    "claude streamed once",
+                    null,
+                    now)));
+        };
+        InvocationService localService = invocationService(
+                callbackThenReturnSameMessage,
+                parserService(parserClient),
+                invocationMessageRepository,
+                threadRepository,
+                messageRepository,
+                null);
+
+        Invocation invocation = localService.execute(task);
+
+        assertThat(invocation.status()).isEqualTo(InvocationStatus.SUCCEEDED);
+        assertThat(messageRepository.findByThreadId("thread-1"))
+                .singleElement()
+                .satisfies(message -> {
+                    assertThat(message.content()).isEqualTo("claude streamed once");
+                    assertThat(message.status()).isEqualTo(ChatMessageStatus.COMPLETED);
+                });
+        assertThat(invocationMessageRepository.findByInvocationId(invocation.invocationId()))
+                .extracting(InvocationMessage::content)
+                .containsExactly("claude streamed once");
+    }
+
+    @Test
+    void keepsThreadRunningWhenOtherTraceTasksRemainOpen() {
+        InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
+        Instant now = Instant.now();
+        threadRepository.save(new ChatThread(
+                "thread-1",
+                "anonymous",
+                "thread",
+                ChatThreadStatus.RUNNING,
+                "trace-1",
+                now,
+                now));
+        InvocationService localService = invocationService(
+                runtimeClient,
+                parserService(parserClient),
+                null,
+                threadRepository,
+                null,
+                null);
+        Task current = task("task-current");
+        Task queuedChild = new Task(
+                "task-child",
+                current.userId(),
+                current.traceId(),
+                current.createdByTaskId(),
+                TaskStatus.QUEUED,
+                TaskSource.AGENT,
+                current.depth() + 1,
+                "opencode",
+                "child",
+                now,
+                now);
+        taskRepository.save(current);
+        taskRepository.save(queuedChild);
+        runtimeClient.result = new AgentExecutionResult(List.of(new AgentMessage(
+                "ignored",
+                current.taskId(),
+                current.traceId(),
+                current.agentId(),
+                AgentMessageType.MESSAGE,
+                "done",
+                null,
+                now)));
+
+        localService.execute(current);
+
+        assertThat(threadRepository.findByTraceId("trace-1").orElseThrow().status())
+                .isEqualTo(ChatThreadStatus.RUNNING);
+    }
+
+    @Test
     void injectsOnlyIncrementalVisibleChatMessagesAndUpdatesCursorOnSuccess() {
         InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
         InMemoryChatMessageRepository messageRepository = new InMemoryChatMessageRepository();
@@ -224,7 +344,7 @@ class InvocationServiceTests {
     }
 
     @Test
-    void doesNotUpdateContextCursorWhenPostRuntimeProcessingFails() {
+    void succeedsAfterRuntimeSuccess() {
         InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
         InMemoryChatMessageRepository messageRepository = new InMemoryChatMessageRepository();
         InMemoryAgentContextCursorRepository cursorRepository = new InMemoryAgentContextCursorRepository();
@@ -238,11 +358,9 @@ class InvocationServiceTests {
                 base,
                 base));
         messageRepository.save(chatMessage("message-1", "user", null, null, base.plusSeconds(1)));
-        FakeParserClient failingParserClient = new FakeParserClient();
-        failingParserClient.agentOutputFailure = new RuntimeException("parser failed");
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(failingParserClient),
+                parserService(parserClient),
                 null,
                 threadRepository,
                 messageRepository,
@@ -261,8 +379,8 @@ class InvocationServiceTests {
 
         Invocation invocation = localService.execute(task);
 
-        assertThat(invocation.status()).isEqualTo(InvocationStatus.FAILED);
-        assertThat(cursorRepository.find("anonymous", "thread-1", "opencode")).isEmpty();
+        assertThat(invocation.status()).isEqualTo(InvocationStatus.SUCCEEDED);
+        assertThat(cursorRepository.find("anonymous", "thread-1", "opencode")).isPresent();
     }
 
     @Test
@@ -529,23 +647,10 @@ class InvocationServiceTests {
     }
 
     private static final class FakeParserClient implements QuestParserClient {
-        private List<ParsedTask> agentTasks = new ArrayList<>();
-        private RuntimeException agentOutputFailure;
-        private int parseAgentOutputCalls;
-
         @Override
         public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
                 String input, List<Agent> availableAgents) {
             return new com.agentcrossing.platform.application.parser.UserInputParseResult(List.of(), null);
-        }
-
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            parseAgentOutputCalls++;
-            if (agentOutputFailure != null) {
-                throw agentOutputFailure;
-            }
-            return agentTasks;
         }
     }
 }

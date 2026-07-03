@@ -1,9 +1,11 @@
 import asyncio
 import errno
 import json
+import logging
 import os
 import pty
 import re
+import select
 import shlex
 import time
 from typing import Any
@@ -16,13 +18,23 @@ from agent_runtime.providers.base import BaseProvider
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 
 
+logger = logging.getLogger(__name__)
+
+
 class OpenCodeProvider(BaseProvider):
     _ANSI_PATTERN = re.compile(r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~]|\x1B[@-Z\\-_])")
     _PLAIN_STATUS_PREFIX_PATTERN = re.compile(r"^>\s+\S+\s+·\s+[A-Za-z0-9._/-]+\s*")
+    _PLAIN_TOOL_STATUS_PATTERN = re.compile(r"^⚙\s+\S+(?:\s+\{.*)?$")
+    _PLAIN_TOOL_ERROR_MARKER = "✗ Invalid Tool"
+    _PLAIN_TOOL_ERROR_LINE_PREFIXES = (
+        "The arguments provided to the tool are invalid:",
+        "Error message:",
+    )
     _SESSION_ID_PATTERN = re.compile(r"\bses_[A-Za-z0-9]+\b")
     _DIAGNOSTIC_TAIL_CHARS = 4000
     _SESSION_EXPORT_ATTEMPTS = 10
     _SESSION_EXPORT_RETRY_DELAY_SECONDS = 5.0
+    _SESSION_LIST_TIMEOUT_SECONDS = 5.0
 
     def __init__(
         self,
@@ -47,6 +59,7 @@ class OpenCodeProvider(BaseProvider):
             ]
 
         env = os.environ.copy()
+        env.pop("AGENT_CROSSING_CALLBACK_TOKEN", None)
         # 这些环境变量让 CLI 进程知道本次 invocation 身份；v1.0 不注入 callback token。
         env.update(
             {
@@ -103,13 +116,25 @@ class OpenCodeProvider(BaseProvider):
         previous_user_marker: str | None = None,
         min_message_created_at_ms: int | None = None,
     ) -> list[AgentMessage]:
+        cli_start = time.perf_counter()
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=settings.cli_cwd,
         )
+        logger.info(
+            "agent_crossing_perf event=cli_startup durationMs=%s provider=opencode invocationId=%s taskId=%s traceId=%s agentId=%s mode=pipes cwd=%s",
+            _elapsed_ms(cli_start),
+            request.invocation_id,
+            request.task_id,
+            request.trace_id,
+            request.agent_id,
+            settings.cli_cwd,
+        )
+        first_output_state: dict[str, bool] = {"logged": False}
         try:
             return await asyncio.wait_for(
                 self._collect_process_messages(
@@ -117,6 +142,8 @@ class OpenCodeProvider(BaseProvider):
                     process,
                     previous_user_marker,
                     min_message_created_at_ms,
+                    cli_start,
+                    first_output_state,
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -137,15 +164,27 @@ class OpenCodeProvider(BaseProvider):
         master_fd, slave_fd = pty.openpty()
         process: asyncio.subprocess.Process | None = None
         try:
+            cli_start = time.perf_counter()
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=slave_fd,
                 stderr=slave_fd,
                 env=env,
+                cwd=settings.cli_cwd,
+            )
+            logger.info(
+                "agent_crossing_perf event=cli_startup durationMs=%s provider=opencode invocationId=%s taskId=%s traceId=%s agentId=%s mode=pty cwd=%s",
+                _elapsed_ms(cli_start),
+                request.invocation_id,
+                request.task_id,
+                request.trace_id,
+                request.agent_id,
+                settings.cli_cwd,
             )
             os.close(slave_fd)
             slave_fd = -1
+            first_output_state: dict[str, bool] = {"logged": False}
             return await asyncio.wait_for(
                 self._collect_pty_messages(
                     request,
@@ -153,6 +192,8 @@ class OpenCodeProvider(BaseProvider):
                     master_fd,
                     previous_user_marker,
                     min_message_created_at_ms,
+                    cli_start,
+                    first_output_state,
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -172,14 +213,33 @@ class OpenCodeProvider(BaseProvider):
         process: asyncio.subprocess.Process,
         previous_user_marker: str | None = None,
         min_message_created_at_ms: int | None = None,
+        process_started_at: float | None = None,
+        first_output_state: dict[str, bool] | None = None,
     ) -> list[AgentMessage]:
         messages: list[AgentMessage] = []
         session_ids: list[str] = []
         diagnostics = self._empty_diagnostics("pipes")
         parse_run_output = not request.provider_session_id
         await asyncio.gather(
-            self._read_stdout(request, process, messages, session_ids, diagnostics, parse_run_output),
-            self._read_stderr(request, process, messages, diagnostics, parse_run_output),
+            self._read_stdout(
+                request,
+                process,
+                messages,
+                session_ids,
+                diagnostics,
+                parse_run_output,
+                process_started_at,
+                first_output_state,
+            ),
+            self._read_stderr(
+                request,
+                process,
+                messages,
+                diagnostics,
+                parse_run_output,
+                process_started_at,
+                first_output_state,
+            ),
         )
         return_code = await process.wait()
         return await self._finalize_process_messages(
@@ -199,15 +259,23 @@ class OpenCodeProvider(BaseProvider):
         master_fd: int,
         previous_user_marker: str | None = None,
         min_message_created_at_ms: int | None = None,
+        process_started_at: float | None = None,
+        first_output_state: dict[str, bool] | None = None,
     ) -> list[AgentMessage]:
         messages: list[AgentMessage] = []
         session_ids: list[str] = []
         diagnostics = self._empty_diagnostics("pty")
         buffer = ""
         while True:
-            chunk = await asyncio.to_thread(self._read_pty_chunk, master_fd)
-            if not chunk:
+            chunk = await asyncio.to_thread(self._read_pty_chunk, master_fd, 0.2)
+            if chunk is None:
+                if process.returncode is not None:
+                    break
+                continue
+            if chunk == b"":
                 break
+            if process_started_at is not None and first_output_state is not None:
+                self._log_first_output(request, process_started_at, first_output_state, "pty")
             text = chunk.decode("utf-8", errors="replace")
             self._append_diagnostic_text(diagnostics, "pty", text)
             if request.provider_session_id:
@@ -234,9 +302,15 @@ class OpenCodeProvider(BaseProvider):
         )
 
     @staticmethod
-    def _read_pty_chunk(master_fd: int) -> bytes:
+    def _read_pty_chunk(master_fd: int, timeout_seconds: float | None = None) -> bytes | None:
+        if timeout_seconds is not None:
+            ready, _, _ = select.select([master_fd], [], [], timeout_seconds)
+            if not ready:
+                return None
         try:
             return os.read(master_fd, 4096)
+        except BlockingIOError:
+            return None
         except OSError as error:
             if error.errno == errno.EIO:
                 return b""
@@ -323,10 +397,14 @@ class OpenCodeProvider(BaseProvider):
         session_ids: list[str],
         diagnostics: dict[str, Any],
         parse_output: bool = True,
+        process_started_at: float | None = None,
+        first_output_state: dict[str, bool] | None = None,
     ) -> None:
         if process.stdout is None:
             return
         while line := await process.stdout.readline():
+            if process_started_at is not None and first_output_state is not None:
+                self._log_first_output(request, process_started_at, first_output_state, "stdout")
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
             self._append_diagnostic_text(diagnostics, "stdout", text + "\n")
             if not parse_output:
@@ -342,10 +420,14 @@ class OpenCodeProvider(BaseProvider):
         messages: list[AgentMessage],
         diagnostics: dict[str, Any],
         parse_output: bool = True,
+        process_started_at: float | None = None,
+        first_output_state: dict[str, bool] | None = None,
     ) -> None:
         if process.stderr is None:
             return
         while line := await process.stderr.readline():
+            if process_started_at is not None and first_output_state is not None:
+                self._log_first_output(request, process_started_at, first_output_state, "stderr")
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
             self._append_diagnostic_text(diagnostics, "stderr", text + "\n")
             if not parse_output:
@@ -373,13 +455,44 @@ class OpenCodeProvider(BaseProvider):
         ):
             return
         try:
+            started_at = time.perf_counter()
             await CallbackClient(request.callback_base_url, timeout_seconds=2.0).post_message(
                 invocation_id=request.invocation_id,
                 content=message.content,
                 stream=True,
             )
+            logger.info(
+                "agent_crossing_perf event=provider_callback durationMs=%s provider=opencode invocationId=%s taskId=%s traceId=%s agentId=%s messageType=%s contentChars=%s",
+                _elapsed_ms(started_at),
+                request.invocation_id,
+                request.task_id,
+                request.trace_id,
+                request.agent_id,
+                message.type,
+                len(message.content or ""),
+            )
         except Exception:
             return
+
+    @staticmethod
+    def _log_first_output(
+        request: AgentExecutionRequest,
+        process_started_at: float,
+        first_output_state: dict[str, bool],
+        stream: str,
+    ) -> None:
+        if first_output_state.get("logged"):
+            return
+        first_output_state["logged"] = True
+        logger.info(
+            "agent_crossing_perf event=first_output durationMs=%s provider=opencode invocationId=%s taskId=%s traceId=%s agentId=%s stream=%s",
+            _elapsed_ms(process_started_at),
+            request.invocation_id,
+            request.task_id,
+            request.trace_id,
+            request.agent_id,
+            stream,
+        )
 
     def _build_command(self, request: AgentExecutionRequest) -> list[str]:
         command = shlex.split(self._command)
@@ -415,6 +528,11 @@ class OpenCodeProvider(BaseProvider):
             stripped = self._strip_plain_status_prefix(stripped)
             if not stripped:
                 continue
+            stripped = self._strip_plain_tool_error(stripped)
+            if not stripped:
+                continue
+            if self._is_plain_tool_status_line(stripped):
+                continue
             event = self._parse_json_line(stripped)
             if event is None:
                 messages.append(self._normalizer.text_delta(request, stripped))
@@ -432,29 +550,39 @@ class OpenCodeProvider(BaseProvider):
         if not command:
             return None
         try:
-            return_code, stdout, _ = await self._run_pty_command_with_timeout(command)
+            return_code, stdout, _ = await self._run_pty_command_with_timeout(
+                command,
+                timeout_seconds=self._session_list_timeout_seconds(),
+            )
         except (FileNotFoundError, TimeoutError):
             return None
         if return_code not in (0, None):
             return None
         return self._extract_latest_session_id_from_list(stdout.decode("utf-8", errors="replace"))
 
-    async def _run_pty_command_with_timeout(self, command: list[str]) -> tuple[int | None, bytes, bytes]:
+    async def _run_pty_command_with_timeout(
+        self,
+        command: list[str],
+        timeout_seconds: float | None = None,
+    ) -> tuple[int | None, bytes, bytes]:
         master_fd, slave_fd = pty.openpty()
         process: asyncio.subprocess.Process | None = None
+        env = os.environ.copy()
+        env.pop("AGENT_CROSSING_CALLBACK_TOKEN", None)
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=slave_fd,
                 stderr=slave_fd,
-                env=os.environ.copy(),
+                env=env,
+                cwd=settings.cli_cwd,
             )
             os.close(slave_fd)
             slave_fd = -1
             return await asyncio.wait_for(
                 self._collect_pty_command_output(process, master_fd),
-                timeout=self._timeout_seconds,
+                timeout=timeout_seconds or self._timeout_seconds,
             )
         except TimeoutError:
             if process is not None and process.returncode is None:
@@ -473,8 +601,12 @@ class OpenCodeProvider(BaseProvider):
     ) -> tuple[int | None, bytes, bytes]:
         chunks: list[bytes] = []
         while True:
-            chunk = await asyncio.to_thread(self._read_pty_chunk, master_fd)
-            if not chunk:
+            chunk = await asyncio.to_thread(self._read_pty_chunk, master_fd, 0.2)
+            if chunk is None:
+                if process.returncode is not None:
+                    break
+                continue
+            if chunk == b"":
                 break
             chunks.append(chunk)
         return_code = await process.wait()
@@ -485,6 +617,9 @@ class OpenCodeProvider(BaseProvider):
         if not command:
             return []
         return [*command, "session", "list"]
+
+    def _session_list_timeout_seconds(self) -> float:
+        return min(self._SESSION_LIST_TIMEOUT_SECONDS, max(0.1, self._timeout_seconds / 4))
 
     def _build_session_export_command(self, session_id: str) -> list[str]:
         command = shlex.split(self._command)
@@ -533,15 +668,29 @@ class OpenCodeProvider(BaseProvider):
         diagnostics["previousUserMarker"] = previous_user_marker
         diagnostics["minMessageCreatedAtMs"] = min_message_created_at_ms
         needs_current_run_match = previous_user_marker is not None or min_message_created_at_ms is not None
+        export_started_at = time.perf_counter()
         for attempt in range(1, self._SESSION_EXPORT_ATTEMPTS + 1):
             diagnostics["attempts"] = attempt
             try:
+                attempt_started_at = time.perf_counter()
                 return_code, stdout, stderr = await self._run_pty_command_with_timeout(command)
+                logger.info(
+                    "agent_crossing_perf event=opencode_export_attempt durationMs=%s invocationId=%s taskId=%s traceId=%s agentId=%s sessionId=%s attempt=%s",
+                    _elapsed_ms(attempt_started_at),
+                    request.invocation_id,
+                    request.task_id,
+                    request.trace_id,
+                    request.agent_id,
+                    session_id,
+                    attempt,
+                )
             except FileNotFoundError:
                 diagnostics["reason"] = "export_command_not_found"
+                self._log_export_total(request, session_id, export_started_at, attempt, "export_command_not_found")
                 return None
             except TimeoutError:
                 diagnostics["reason"] = "export_timeout"
+                self._log_export_total(request, session_id, export_started_at, attempt, "export_timeout")
                 return None
 
             stdout_text = stdout.decode("utf-8", errors="replace")
@@ -573,6 +722,7 @@ class OpenCodeProvider(BaseProvider):
                 if text:
                     diagnostics["reason"] = "recovered_assistant_text"
                     diagnostics["recoveredAttempt"] = attempt
+                    self._log_export_total(request, session_id, export_started_at, attempt, "recovered_assistant_text")
                     return self._normalizer.text_delta(
                         request,
                         text,
@@ -595,7 +745,28 @@ class OpenCodeProvider(BaseProvider):
             if attempt < self._SESSION_EXPORT_ATTEMPTS:
                 await asyncio.sleep(self._SESSION_EXPORT_RETRY_DELAY_SECONDS)
 
+        self._log_export_total(request, session_id, export_started_at, self._SESSION_EXPORT_ATTEMPTS, diagnostics.get("reason", "not_recovered"))
         return None
+
+    @staticmethod
+    def _log_export_total(
+        request: AgentExecutionRequest,
+        session_id: str,
+        started_at: float,
+        attempts: int,
+        reason: object,
+    ) -> None:
+        logger.info(
+            "agent_crossing_perf event=opencode_export_total durationMs=%s invocationId=%s taskId=%s traceId=%s agentId=%s sessionId=%s attempts=%s reason=%s",
+            _elapsed_ms(started_at),
+            request.invocation_id,
+            request.task_id,
+            request.trace_id,
+            request.agent_id,
+            session_id,
+            attempts,
+            reason,
+        )
 
     @staticmethod
     def _empty_diagnostics(execution_mode: str) -> dict[str, Any]:
@@ -660,6 +831,20 @@ class OpenCodeProvider(BaseProvider):
     @classmethod
     def _strip_plain_status_prefix(cls, line: str) -> str:
         return cls._PLAIN_STATUS_PREFIX_PATTERN.sub("", line, count=1).strip()
+
+    @classmethod
+    def _is_plain_tool_status_line(cls, line: str) -> bool:
+        return bool(cls._PLAIN_TOOL_STATUS_PATTERN.match(line.strip()))
+
+    @classmethod
+    def _strip_plain_tool_error(cls, line: str) -> str:
+        stripped = line.strip()
+        if any(stripped.startswith(prefix) for prefix in cls._PLAIN_TOOL_ERROR_LINE_PREFIXES):
+            return ""
+        marker_index = stripped.find(cls._PLAIN_TOOL_ERROR_MARKER)
+        if marker_index >= 0:
+            return stripped[:marker_index].strip()
+        return stripped
 
     @classmethod
     def _clean_terminal_text(cls, text: str) -> str:
@@ -1080,3 +1265,7 @@ class OpenCodeProvider(BaseProvider):
             lines.append(f"{speaker}: {message.content}")
         lines.append("")
         return "\n".join(lines) + "\n"
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)

@@ -264,9 +264,5 @@ class ChatServiceTests {
                     List.of(), directAnswer, this.providerSessionId);
         }
 
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            return List.of();
-        }
     }
 }

@@ -6,10 +6,31 @@ class MasterAgentModel(BaseModel):
 
 
 class PlannedTask(MasterAgentModel):
-    task_id: str = Field(alias="taskId")
-    agent_id: str = Field(alias="agentId")
-    context: str
-    depends_on: list[str] = Field(default_factory=list, alias="dependsOn")
+    task_id: str = Field(alias="taskId", description="Unique task id, usually starting with task-.")
+    agent_id: str = Field(alias="agentId", description="Target business agent id, for example opencode or claudecode.")
+    context: str = Field(
+        description=(
+            "Concise instruction for the target agent. Do not copy full conversation history, "
+            "tool outputs, JSON blocks, or long quoted source text into this field; the platform "
+            "injects conversation history separately."
+        )
+    )
+    depends_on: list[str] = Field(
+        default_factory=list,
+        alias="dependsOn",
+        description="Task ids that must complete before this task can run.",
+    )
+
+
+class AppendTask(PlannedTask):
+    context: str = Field(
+        description=(
+            "Concise follow-up instruction for the target agent. Do not copy full conversation "
+            "history, tool outputs, JSON blocks, or long quoted source text into this field; "
+            "the platform injects conversation history separately."
+        ),
+        max_length=1200,
+    )
 
 
 class SubmitTaskPlanInput(MasterAgentModel):

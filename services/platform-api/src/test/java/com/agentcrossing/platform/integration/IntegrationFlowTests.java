@@ -83,7 +83,7 @@ class IntegrationFlowTests {
             parserService, taskRepository, taskDependencyRepository, questHub);
 
     @Test
-    void runsUserInputToInvocationToFollowUpTaskFlow() {
+    void runsUserInputToInvocationWithoutParsingNaturalLanguageFollowUpTasks() {
         List<TaskResponse> submitted = taskController.submit("anonymous", new SubmitTaskRequest("please start")).data();
 
         assertThat(submitted).extracting(TaskResponse::taskId).containsExactly("task-root");
@@ -96,11 +96,8 @@ class IntegrationFlowTests {
         assertThat(invocationRepository.findAll())
                 .extracting(Invocation::status)
                 .containsExactly(InvocationStatus.SUCCEEDED);
-        assertThat(questHub.snapshot()).containsExactly("task-follow-up");
-        Task followUp = taskRepository.findByTaskId("task-follow-up").orElseThrow();
-        assertThat(followUp.createdByTaskId()).isEqualTo("task-root");
-        assertThat(followUp.depth()).isEqualTo(1);
-        assertThat(followUp.traceId()).isEqualTo(taskRepository.findByTaskId("task-root").orElseThrow().traceId());
+        assertThat(questHub.snapshot()).isEmpty();
+        assertThat(taskRepository.findByTaskId("task-follow-up")).isEmpty();
     }
 
     @Test
@@ -113,7 +110,7 @@ class IntegrationFlowTests {
 
         assertThat(processed.taskId()).isEqualTo("task-a");
         assertThat(taskRepository.findByTaskId("task-a").orElseThrow().status()).isEqualTo(TaskStatus.COMPLETED);
-        assertThat(questHub.snapshot()).containsExactly("task-b", "task-follow-up");
+        assertThat(questHub.snapshot()).containsExactly("task-b");
     }
 
     @Test
@@ -126,7 +123,7 @@ class IntegrationFlowTests {
     }
 
     @Test
-    void agentOutputTasksDeeperThanTenAreDropped() {
+    void appendedAgentTasksDeeperThanTenAreDropped() {
         Instant now = Instant.now();
         Task sourceTask = new Task(
                 "deep-source",
@@ -142,7 +139,9 @@ class IntegrationFlowTests {
                 now);
         taskRepository.save(sourceTask);
 
-        List<Task> created = parserService.parseAgentOutputAndEnqueue(sourceTask, "@opencode too deep");
+        List<Task> created = parserService.appendAgentTasks(
+                sourceTask,
+                List.of(new ParsedTask("task-follow-up", "opencode", "too deep", List.of())));
 
         assertThat(created).isEmpty();
         assertThat(questHub.snapshot()).isEmpty();
@@ -224,13 +223,6 @@ class IntegrationFlowTests {
                     List.of(new ParsedTask("task-root", "opencode", input, List.of())), null);
         }
 
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            if (output.contains("@opencode")) {
-                return List.of(new ParsedTask("task-follow-up", "opencode", "follow up", List.of()));
-            }
-            return List.of();
-        }
     }
 
     private static final class FakeRuntimeClient implements AgentRuntimeClient {

@@ -181,6 +181,32 @@ def test_master_agent_runner_captures_claudecode_session_id(tmp_path) -> None:
     assert session_ids == ["claude-master-new"]
 
 
+def test_master_agent_runner_uses_configured_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    cli_cwd = tmp_path / "project-root"
+    cli_cwd.mkdir()
+    cwd_log = tmp_path / "master-cwd.txt"
+    script = tmp_path / "fake_claude_master_cwd.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import os",
+                "import pathlib",
+                f"pathlib.Path({str(cwd_log)!r}).write_text(os.getcwd(), encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "cli_working_directory", str(cli_cwd))
+
+    return_code = asyncio.run(MasterAgentPlanner._run_process([sys.executable, str(script)], {}, [], [], []))
+
+    assert return_code == 0
+    assert cwd_log.read_text(encoding="utf-8") == str(cli_cwd)
+
+
 def test_master_agent_planner_uses_stdout_text_as_direct_answer_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -528,6 +554,45 @@ def test_fastmcp_create_tasks_appends_platform_tasks(monkeypatch: pytest.MonkeyP
     asyncio.run(scenario())
 
     assert calls == [("task-a", "user-1", ["task-d"])]
+
+
+def test_fastmcp_create_tasks_rejects_full_history_sized_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeTaskStatusClient:
+        async def create_tasks(
+            self,
+            source_task_id: str,
+            tasks: list[PlannedTask],
+            user_id: str,
+        ) -> CreateTasksResult:
+            return CreateTasksResult(
+                sourceTaskId=source_task_id,
+                userId=user_id,
+                createdTasks=[],
+                createdCount=0,
+                message="unexpected",
+            )
+
+    async def scenario() -> None:
+        monkeypatch.setattr(mcp_server, "task_status_client", FakeTaskStatusClient())
+        async with Client(master_agent_mcp) as client:
+            await client.call_tool(
+                "create_tasks",
+                {
+                    "sourceTaskId": "task-a",
+                    "userId": "user-1",
+                    "tasks": [
+                        {
+                            "taskId": "task-d",
+                            "agentId": "opencode",
+                            "context": "x" * 1201,
+                            "dependsOn": [],
+                        }
+                    ],
+                },
+            )
+
+    with pytest.raises(Exception, match="String should have at most 1200 characters"):
+        asyncio.run(scenario())
 
 
 def test_parser_api_accepts_agent_cards_and_reports_master_agent_failure(

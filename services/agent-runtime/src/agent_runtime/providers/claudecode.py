@@ -1,7 +1,9 @@
 import asyncio
 import json
+import logging
 import os
 import shlex
+import time
 from typing import Any
 
 from agent_runtime.callback.client import CallbackClient
@@ -10,6 +12,9 @@ from agent_runtime.contracts.models import AgentExecutionRequest, AgentMessage, 
 from agent_runtime.prompt_config import load_prompt_config
 from agent_runtime.providers.base import BaseProvider
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
+
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeCodeProvider(BaseProvider):
@@ -36,6 +41,7 @@ class ClaudeCodeProvider(BaseProvider):
             ]
 
         env = os.environ.copy()
+        env.pop("AGENT_CROSSING_CALLBACK_TOKEN", None)
         env.update(
             {
                 "AGENT_CROSSING_INVOCATION_ID": request.invocation_id,
@@ -50,15 +56,27 @@ class ClaudeCodeProvider(BaseProvider):
 
         process: asyncio.subprocess.Process | None = None
         try:
+            cli_start = time.perf_counter()
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=settings.cli_cwd,
             )
+            logger.info(
+                "agent_crossing_perf event=cli_startup durationMs=%s provider=claudecode invocationId=%s taskId=%s traceId=%s agentId=%s cwd=%s",
+                _elapsed_ms(cli_start),
+                request.invocation_id,
+                request.task_id,
+                request.trace_id,
+                request.agent_id,
+                settings.cli_cwd,
+            )
+            first_output_state: dict[str, bool] = {"logged": False}
             messages = await asyncio.wait_for(
-                self._collect_process_messages(request, process),
+                self._collect_process_messages(request, process, cli_start, first_output_state),
                 timeout=self._timeout_seconds,
             )
         except FileNotFoundError:
@@ -81,12 +99,14 @@ class ClaudeCodeProvider(BaseProvider):
         self,
         request: AgentExecutionRequest,
         process: asyncio.subprocess.Process,
+        process_started_at: float,
+        first_output_state: dict[str, bool],
     ) -> list[AgentMessage]:
         messages: list[AgentMessage] = []
         session_ids: list[str] = []
         await asyncio.gather(
-            self._read_stdout(request, process, messages, session_ids),
-            self._read_stderr(request, process, messages),
+            self._read_stdout(request, process, messages, session_ids, process_started_at, first_output_state),
+            self._read_stderr(request, process, messages, process_started_at, first_output_state),
         )
         return_code = await process.wait()
         session_id = session_ids[-1] if session_ids else None
@@ -116,12 +136,22 @@ class ClaudeCodeProvider(BaseProvider):
         process: asyncio.subprocess.Process,
         messages: list[AgentMessage],
         session_ids: list[str],
+        process_started_at: float,
+        first_output_state: dict[str, bool],
     ) -> None:
         if process.stdout is None:
             return
+        emitted_assistant_text = ""
         while line := await process.stdout.readline():
+            self._log_first_output(request, process_started_at, first_output_state, "stdout")
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
             for message in self._stdout_to_messages(request, text, session_ids):
+                message, emitted_assistant_text = self._dedupe_assistant_text_message(
+                    message,
+                    emitted_assistant_text,
+                )
+                if message is None:
+                    continue
                 messages.append(message)
                 await self._post_stream_message(request, message)
 
@@ -130,10 +160,13 @@ class ClaudeCodeProvider(BaseProvider):
         request: AgentExecutionRequest,
         process: asyncio.subprocess.Process,
         messages: list[AgentMessage],
+        process_started_at: float,
+        first_output_state: dict[str, bool],
     ) -> None:
         if process.stderr is None:
             return
         while line := await process.stderr.readline():
+            self._log_first_output(request, process_started_at, first_output_state, "stderr")
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
             if not text:
                 continue
@@ -153,13 +186,44 @@ class ClaudeCodeProvider(BaseProvider):
         ):
             return
         try:
+            started_at = time.perf_counter()
             await CallbackClient(request.callback_base_url, timeout_seconds=2.0).post_message(
                 invocation_id=request.invocation_id,
                 content=message.content,
                 stream=True,
             )
+            logger.info(
+                "agent_crossing_perf event=provider_callback durationMs=%s provider=claudecode invocationId=%s taskId=%s traceId=%s agentId=%s messageType=%s contentChars=%s",
+                _elapsed_ms(started_at),
+                request.invocation_id,
+                request.task_id,
+                request.trace_id,
+                request.agent_id,
+                message.type,
+                len(message.content or ""),
+            )
         except Exception:
             return
+
+    @staticmethod
+    def _log_first_output(
+        request: AgentExecutionRequest,
+        process_started_at: float,
+        first_output_state: dict[str, bool],
+        stream: str,
+    ) -> None:
+        if first_output_state.get("logged"):
+            return
+        first_output_state["logged"] = True
+        logger.info(
+            "agent_crossing_perf event=first_output durationMs=%s provider=claudecode invocationId=%s taskId=%s traceId=%s agentId=%s stream=%s",
+            _elapsed_ms(process_started_at),
+            request.invocation_id,
+            request.task_id,
+            request.trace_id,
+            request.agent_id,
+            stream,
+        )
 
     def _build_command(self, request: AgentExecutionRequest) -> list[str]:
         command = shlex.split(self._command)
@@ -390,6 +454,33 @@ class ClaudeCodeProvider(BaseProvider):
         return not ClaudeCodeProvider._is_tool_use_message(message)
 
     @staticmethod
+    def _dedupe_assistant_text_message(
+        message: AgentMessage,
+        emitted_assistant_text: str,
+    ) -> tuple[AgentMessage | None, str]:
+        if (
+            message.type not in (AgentMessageType.TEXT_DELTA, AgentMessageType.MESSAGE)
+            or ClaudeCodeProvider._is_tool_use_message(message)
+            or not message.content
+        ):
+            return message, emitted_assistant_text
+
+        content = message.content
+        if not emitted_assistant_text:
+            return message, content
+
+        if content == emitted_assistant_text:
+            return None, emitted_assistant_text
+
+        if content.startswith(emitted_assistant_text):
+            suffix = content[len(emitted_assistant_text):]
+            if not suffix:
+                return None, emitted_assistant_text
+            return message.model_copy(update={"content": suffix}), emitted_assistant_text + suffix
+
+        return message, emitted_assistant_text + content
+
+    @staticmethod
     def _is_tool_use_message(message: AgentMessage) -> bool:
         if message.type != AgentMessageType.MESSAGE:
             return False
@@ -397,3 +488,7 @@ class ClaudeCodeProvider(BaseProvider):
             return True
         content = (message.content or "").strip()
         return content == "tool_use" or content.startswith("tool_use:")
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)

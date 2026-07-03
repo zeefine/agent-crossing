@@ -29,10 +29,13 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 @Service
 public class InvocationService {
+    private static final Logger log = LoggerFactory.getLogger(InvocationService.class);
     private final InvocationRepository invocationRepository;
     private final TaskRepository taskRepository;
     private final TaskDependencyRepository taskDependencyRepository;
@@ -91,6 +94,7 @@ public class InvocationService {
 
         try {
             AgentContextPack contextPack = buildContextPack(task);
+            long runtimeStartedAt = System.nanoTime();
             AgentExecutionResult result = agentRuntimeClient.execute(new AgentExecutionRequest(
                     invocation.invocationId(),
                     invocation.userId(),
@@ -101,6 +105,15 @@ public class InvocationService {
                     callbackBaseUrl,
                     contextPack,
                     findProviderSessionId(task)));
+            log.info(
+                    "agent_crossing_perf event=business_agent_runtime durationMs={} userId={} invocationId={} taskId={} traceId={} agentId={} messages={}",
+                    elapsedMs(runtimeStartedAt),
+                    invocation.userId(),
+                    invocation.invocationId(),
+                    task.taskId(),
+                    task.traceId(),
+                    task.agentId(),
+                    result.messages().size());
             rememberProviderSession(task, result);
             persistAgentMessages(invocation, result);
             if (result.hasError()) {
@@ -110,11 +123,11 @@ public class InvocationService {
             Task completedTask = taskRepository.updateStatus(task.taskId(), TaskStatus.COMPLETED);
             markAssistantStreamFinal(invocation.invocationId(), ChatMessageStatus.COMPLETED, null);
             publishTask(completedTask);
-            // 先完成原 task，再解析 agent 输出生成后续任务，避免解析失败影响本次执行状态。
-            List<Task> generatedTasks = questParserService.parseAgentOutputAndEnqueue(completedTask, result.aggregateOutput());
             updateThreadStatus(
                     completedTask.traceId(),
-                    generatedTasks.isEmpty() ? ChatThreadStatus.COMPLETED : ChatThreadStatus.RUNNING);
+                    hasOpenTasks(completedTask.traceId(), completedTask.userId())
+                            ? ChatThreadStatus.RUNNING
+                            : ChatThreadStatus.COMPLETED);
             acknowledgeInjectedContext(task, contextPack);
             return invocation;
         } catch (RuntimeException exception) {
@@ -230,8 +243,7 @@ public class InvocationService {
     }
 
     private void persistAgentMessages(Invocation invocation, AgentExecutionResult result) {
-        boolean hasStreamedMessages = invocationMessageRepository != null
-                && !invocationMessageRepository.findByInvocationId(invocation.invocationId()).isEmpty();
+        boolean hasStreamedMessages = hasStreamedInvocationMessages(invocation.invocationId());
         for (AgentMessage message : result.messages()) {
             if (hasStreamedMessages && message.type() != AgentMessageType.DONE) {
                 continue;
@@ -269,6 +281,14 @@ public class InvocationService {
                         ChatMessageStatus.FAILED);
             }
         }
+    }
+
+    private boolean hasStreamedInvocationMessages(String invocationId) {
+        boolean hasInvocationEvents = invocationMessageRepository != null
+                && !invocationMessageRepository.findByInvocationId(invocationId).isEmpty();
+        boolean hasAssistantStream = chatMessageRepository != null
+                && chatMessageRepository.findAssistantStreamByInvocationId(invocationId).isPresent();
+        return hasInvocationEvents || hasAssistantStream;
     }
 
     private void saveAssistantMessage(
@@ -369,6 +389,11 @@ public class InvocationService {
                 });
     }
 
+    private boolean hasOpenTasks(String traceId, String userId) {
+        return taskRepository.findByTraceIdAndUserId(traceId, userId).stream()
+                .anyMatch(task -> task.status() == TaskStatus.QUEUED || task.status() == TaskStatus.PROCESSING);
+    }
+
     private void publishInvocationMessage(InvocationMessage message) {
         if (chatEventService == null || chatThreadRepository == null) {
             return;
@@ -418,5 +443,9 @@ public class InvocationService {
                 pending.addAll(taskDependencyRepository.findChildTaskIds(child.taskId()));
             });
         }
+    }
+
+    private static long elapsedMs(long startedAtNanos) {
+        return (System.nanoTime() - startedAtNanos) / 1_000_000;
     }
 }

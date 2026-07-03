@@ -90,12 +90,13 @@ class QuestParserServiceTests {
     }
 
     @Test
-    void parsesAgentOutputInheritsTraceDepthAndSourceTask() {
+    void appendAgentTasksInheritsTraceDepthAndSourceTask() {
         Task sourceTask = sourceTask(0);
         taskRepository.save(sourceTask);
-        parserClient.agentTasks = List.of(new ParsedTask("task-child", "opencode", "continue", List.of()));
 
-        List<Task> tasks = service.parseAgentOutputAndEnqueue(sourceTask, "@opencode continue");
+        List<Task> tasks = service.appendAgentTasks(
+                sourceTask,
+                List.of(new ParsedTask("task-child", "opencode", "continue", List.of())));
 
         assertThat(tasks).hasSize(1);
         Task task = tasks.getFirst();
@@ -107,12 +108,13 @@ class QuestParserServiceTests {
     }
 
     @Test
-    void dropsAgentOutputTasksRejectedByLoopGuard() {
+    void dropsAppendedAgentTasksRejectedByLoopGuard() {
         Task sourceTask = sourceTask(10);
         taskRepository.save(sourceTask);
-        parserClient.agentTasks = List.of(new ParsedTask("too-deep", "opencode", "continue", List.of()));
 
-        List<Task> tasks = service.parseAgentOutputAndEnqueue(sourceTask, "@opencode continue");
+        List<Task> tasks = service.appendAgentTasks(
+                sourceTask,
+                List.of(new ParsedTask("too-deep", "opencode", "continue", List.of())));
 
         assertThat(tasks).isEmpty();
         assertThat(questHub.snapshot()).isEmpty();
@@ -153,16 +155,10 @@ class QuestParserServiceTests {
 
     private static final class FakeQuestParserClient implements QuestParserClient {
         private List<ParsedTask> userTasks = new ArrayList<>();
-        private List<ParsedTask> agentTasks = new ArrayList<>();
 
         @Override
         public UserInputParseResult parseUserInput(String input, List<Agent> availableAgents) {
             return new UserInputParseResult(userTasks, null);
-        }
-
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            return agentTasks;
         }
     }
 }

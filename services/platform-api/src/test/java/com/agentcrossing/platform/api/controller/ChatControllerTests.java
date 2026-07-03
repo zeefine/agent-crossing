@@ -98,9 +98,5 @@ class ChatControllerTests {
                     List.of(new ParsedTask("task-chat", "opencode", input, List.of())), null);
         }
 
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            return List.of();
-        }
     }
 }

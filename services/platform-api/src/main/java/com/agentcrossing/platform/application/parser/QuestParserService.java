@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -33,6 +35,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public class QuestParserService {
     public static final String MASTER_AGENT_ID = "masteragent";
     public static final String MASTER_AGENT_PROVIDER = "claudecode";
+    private static final Logger log = LoggerFactory.getLogger(QuestParserService.class);
 
     private final QuestParserClient parserClient;
     private final AgentRegistry agentRegistry;
@@ -158,12 +161,6 @@ public class QuestParserService {
     }
 
     @Transactional
-    public List<Task> parseAgentOutputAndEnqueue(Task sourceTask, String output) {
-        List<ParsedTask> parsedTasks = parserClient.parseAgentOutput(sourceTask, output, agentRegistry.findAll());
-        return appendAgentTasks(sourceTask, parsedTasks);
-    }
-
-    @Transactional
     public List<Task> appendAgentTasks(Task sourceTask, List<ParsedTask> parsedTasks) {
         List<ParsedTask> appendTasks = validateAppendPlan(sourceTask, parsedTasks);
         List<Task> accepted = new ArrayList<>();
@@ -198,11 +195,17 @@ public class QuestParserService {
             return;
         }
         Runnable enqueue = () -> {
+            long startedAt = System.nanoTime();
             accepted.forEach(task -> {
                 questHub.enqueueLast(task.taskId());
                 publishTask(task);
             });
             signalIfAccepted(accepted);
+            log.info(
+                    "agent_crossing_perf event=questhub_enqueue durationMs={} tasks={} taskIds={}",
+                    elapsedMs(startedAt),
+                    accepted.size(),
+                    accepted.stream().map(Task::taskId).toList());
         };
         if (TransactionSynchronizationManager.isActualTransactionActive()
                 && TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -227,6 +230,10 @@ public class QuestParserService {
         if (taskEventService != null) {
             taskEventService.publish(task);
         }
+    }
+
+    private static long elapsedMs(long startedAtNanos) {
+        return (System.nanoTime() - startedAtNanos) / 1_000_000;
     }
 
     private void ensureUser(String userId) {

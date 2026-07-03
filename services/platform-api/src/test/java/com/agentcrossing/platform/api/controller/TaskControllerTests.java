@@ -121,9 +121,5 @@ class TaskControllerTests {
                     List.of(new ParsedTask("task-api", "opencode", input, List.of())), null);
         }
 
-        @Override
-        public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-            return List.of();
-        }
     }
 }

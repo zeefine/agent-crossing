@@ -10,10 +10,15 @@ import com.agentcrossing.platform.domain.task.TaskStatus;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.time.Duration;
+import java.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 @Service
 public class QuestRouterService {
+    private static final Logger log = LoggerFactory.getLogger(QuestRouterService.class);
     private final Object routingLock = new Object();
     private final QuestHub questHub;
     private final TaskRepository taskRepository;
@@ -38,14 +43,28 @@ public class QuestRouterService {
     }
 
     public Optional<Task> processNext() {
+        long startedAt = System.nanoTime();
         Acquisition acquisition = acquireNextDispatchTask();
         acquisition.blockedTasks().forEach(taskEventService::publish);
         if (acquisition.dispatchTask().isEmpty()) {
+            log.info(
+                    "agent_crossing_perf event=router_drain_empty durationMs={} blockedTasks={}",
+                    elapsedMs(startedAt),
+                    acquisition.blockedTasks().size());
             return Optional.empty();
         }
 
         Task task = acquisition.dispatchTask().get();
         taskEventService.publish(task);
+        log.info(
+                "agent_crossing_perf event=router_dispatch durationMs={} routerWaitMs={} userId={} taskId={} traceId={} agentId={} blockedTasks={}",
+                elapsedMs(startedAt),
+                routerWaitMs(task),
+                task.userId(),
+                task.taskId(),
+                task.traceId(),
+                task.agentId(),
+                acquisition.blockedTasks().size());
         parallelTaskWorker.submit(task);
         return Optional.of(task);
     }
@@ -126,4 +145,16 @@ public class QuestRouterService {
     }
 
     private record Acquisition(Optional<Task> dispatchTask, List<Task> blockedTasks) {}
+
+    private static long elapsedMs(long startedAtNanos) {
+        return (System.nanoTime() - startedAtNanos) / 1_000_000;
+    }
+
+    private static long routerWaitMs(Task task) {
+        Instant createdAt = task.createdAt();
+        if (createdAt == null) {
+            return -1;
+        }
+        return Math.max(0, Duration.between(createdAt, Instant.now()).toMillis());
+    }
 }

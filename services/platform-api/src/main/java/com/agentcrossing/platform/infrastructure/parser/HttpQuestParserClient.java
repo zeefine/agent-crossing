@@ -6,7 +6,6 @@ import com.agentcrossing.platform.application.parser.ParsedTask;
 import com.agentcrossing.platform.application.parser.QuestParserClient;
 import com.agentcrossing.platform.application.parser.UserInputParseResult;
 import com.agentcrossing.platform.domain.agent.Agent;
-import com.agentcrossing.platform.domain.task.Task;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -51,21 +50,6 @@ public class HttpQuestParserClient implements QuestParserClient {
         }
     }
 
-    @Override
-    public List<ParsedTask> parseAgentOutput(Task sourceTask, String output, List<Agent> availableAgents) {
-        try {
-            AgentOutputParseResponse response = restClient.post()
-                    .uri("/api/parser/agent-output")
-                    .body(new AgentOutputParseRequest(
-                            sourceTask.taskId(), sourceTask.agentId(), output, toAgentIds(availableAgents)))
-                    .retrieve()
-                    .body(AgentOutputParseResponse.class);
-            return response == null ? List.of() : response.toParsedTasks();
-        } catch (RestClientResponseException exception) {
-            throw translateRuntimeError("parse agent output", exception);
-        }
-    }
-
     private static IllegalArgumentException translateRuntimeError(String operation, RestClientResponseException exception) {
         RuntimeError error = parseRuntimeError(exception.getResponseBodyAsString());
         String code = error.code() == null || error.code().isBlank() ? "RUNTIME_HTTP_" + exception.getStatusCode().value() : error.code();
@@ -91,10 +75,6 @@ public class HttpQuestParserClient implements QuestParserClient {
             // Non-JSON runtime failures still get translated with HTTP status information.
         }
         return RuntimeError.empty();
-    }
-
-    private static List<String> toAgentIds(List<Agent> agents) {
-        return agents.stream().map(Agent::agentId).toList();
     }
 
     private static List<AvailableAgentCard> toAgentCards(List<Agent> agents) {
@@ -126,22 +106,12 @@ public class HttpQuestParserClient implements QuestParserClient {
         }
     }
 
-    private record AgentOutputParseRequest(
-            String sourceTaskId, String sourceAgentId, String output, List<String> availableAgentIds) {
-    }
-
     private record UserInputParseResponse(List<ParsedTaskDto> tasks, String directAnswer, String providerSessionId) {
         UserInputParseResult toResult() {
             return new UserInputParseResult(
                     tasks == null ? List.of() : tasks.stream().map(ParsedTaskDto::toParsedTask).toList(),
                     directAnswer,
                     providerSessionId);
-        }
-    }
-
-    private record AgentOutputParseResponse(List<ParsedTaskDto> tasks) {
-        List<ParsedTask> toParsedTasks() {
-            return tasks == null ? List.of() : tasks.stream().map(ParsedTaskDto::toParsedTask).toList();
         }
     }
 

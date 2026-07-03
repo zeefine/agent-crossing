@@ -224,11 +224,6 @@ class QuestRouterServiceTests {
             return new com.agentcrossing.platform.application.parser.UserInputParseResult(List.of(), null);
         }
 
-        @Override
-        public List<com.agentcrossing.platform.application.parser.ParsedTask> parseAgentOutput(
-                Task sourceTask, String output, List<Agent> availableAgents) {
-            return List.of();
-        }
     }
 
     private static final class BlockingRuntimeClient implements AgentRuntimeClient {

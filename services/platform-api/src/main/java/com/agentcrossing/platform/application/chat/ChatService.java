@@ -312,14 +312,28 @@ public class ChatService {
     }
 
     private void processUserInput(String userId, String threadId, String content) {
+        long planningStartedAt = System.nanoTime();
         try {
             ChatThread thread = chatThreadRepository
                     .findByThreadIdAndUserId(threadId, userId)
                     .orElseThrow(() -> new IllegalArgumentException("Chat thread not found: " + threadId));
             UserInputParseResult parseResult =
                     questParserService.parseUserInput(userId, thread.threadId(), thread.traceId(), content);
+            log.info(
+                    "agent_crossing_perf event=master_agent_planning durationMs={} userId={} threadId={} traceId={} tasks={} directAnswer={}",
+                    elapsedMs(planningStartedAt),
+                    userId,
+                    thread.threadId(),
+                    thread.traceId(),
+                    parseResult.tasks().size(),
+                    parseResult.directAnswer() != null);
             runInTransaction(() -> savePlanningResult(userId, threadId, thread.traceId(), parseResult));
         } catch (Exception exception) {
+            log.info(
+                    "agent_crossing_perf event=master_agent_planning_failed durationMs={} userId={} threadId={}",
+                    elapsedMs(planningStartedAt),
+                    userId,
+                    threadId);
             runInTransaction(() -> markPlanningFailed(userId, threadId, exception));
         }
     }
@@ -336,8 +350,17 @@ public class ChatService {
         ChatThread thread = chatThreadRepository
                 .findByThreadIdAndUserId(threadId, userId)
                 .orElseThrow(() -> new IllegalArgumentException("Chat thread not found: " + threadId));
+        long enqueueStartedAt = System.nanoTime();
         UserInputEnqueueResult enqueueResult =
                 questParserService.enqueueParsedUserInput(userId, parseResult, traceId);
+        log.info(
+                "agent_crossing_perf event=user_input_enqueue durationMs={} userId={} threadId={} traceId={} tasks={} directAnswer={}",
+                elapsedMs(enqueueStartedAt),
+                userId,
+                threadId,
+                traceId,
+                enqueueResult.tasks().size(),
+                enqueueResult.directAnswer() != null);
         if (enqueueResult.directAnswer() != null) {
             Instant answerTime = Instant.now();
             ChatMessage assistantMessage = chatMessageRepository.save(new ChatMessage(
@@ -413,5 +436,9 @@ public class ChatService {
             return "New chat";
         }
         return normalized.length() <= 48 ? normalized : normalized.substring(0, 48);
+    }
+
+    private static long elapsedMs(long startedAtNanos) {
+        return (System.nanoTime() - startedAtNanos) / 1_000_000;
     }
 }

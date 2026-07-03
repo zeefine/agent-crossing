@@ -1,7 +1,9 @@
 import asyncio
 import json
+import logging
 import os
 import shlex
+import time
 from collections.abc import Awaitable, Callable
 
 from agent_runtime.config import settings
@@ -10,6 +12,9 @@ from agent_runtime.master_agent.errors import MasterAgentPlanningError
 from agent_runtime.master_agent.models import PlannedTask
 from agent_runtime.master_agent.planning_sessions import PlanningResult, PlanningSessionStore, planning_session_store
 from agent_runtime.prompt_config import load_prompt_config
+
+
+logger = logging.getLogger(__name__)
 
 
 class MasterAgentPlanner:
@@ -40,6 +45,7 @@ class MasterAgentPlanner:
                 )
 
             env = os.environ.copy()
+            env.pop("AGENT_CROSSING_CALLBACK_TOKEN", None)
             env["AGENT_CROSSING_PLANNING_SESSION_ID"] = session.planning_session_id
             env["AGENT_CROSSING_AVAILABLE_AGENT_IDS"] = ",".join(
                 agent.agent_id for agent in request.available_agents
@@ -48,8 +54,17 @@ class MasterAgentPlanner:
             session_ids: list[str] = []
             stdout_text_chunks: list[str] = []
             stderr_lines: list[str] = []
+            process_started_at = time.perf_counter()
             process_task = asyncio.create_task(
-                self._run_master_process(command, env, session_ids, stdout_text_chunks, stderr_lines)
+                self._run_master_process(
+                    command,
+                    env,
+                    session_ids,
+                    stdout_text_chunks,
+                    stderr_lines,
+                    request,
+                    process_started_at,
+                )
             )
             plan_task = asyncio.create_task(
                 self._session_store.wait(
@@ -183,10 +198,20 @@ class MasterAgentPlanner:
         session_ids: list[str],
         stdout_text_chunks: list[str],
         stderr_lines: list[str],
+        request: UserInputParseRequest,
+        process_started_at: float,
     ) -> int:
         if self._process_runner is not None:
             return await self._process_runner(command, env)
-        return await self._run_process(command, env, session_ids, stdout_text_chunks, stderr_lines)
+        return await self._run_process(
+            command,
+            env,
+            session_ids,
+            stdout_text_chunks,
+            stderr_lines,
+            request,
+            process_started_at,
+        )
 
     @staticmethod
     async def _run_process(
@@ -195,20 +220,45 @@ class MasterAgentPlanner:
         session_ids: list[str],
         stdout_text_chunks: list[str],
         stderr_lines: list[str],
+        request: UserInputParseRequest | None = None,
+        process_started_at: float | None = None,
     ) -> int:
+        cli_start = time.perf_counter()
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=settings.cli_cwd,
         )
+        if request is not None:
+            logger.info(
+                "agent_crossing_perf event=cli_startup durationMs=%s provider=masteragent invocationId=- taskId=- traceId=%s agentId=masteragent cwd=%s",
+                _elapsed_ms(cli_start),
+                request.trace_id,
+                settings.cli_cwd,
+            )
+        first_output_state: dict[str, bool] = {"logged": False}
         try:
             await asyncio.wait_for(
                 asyncio.gather(
                     process.wait(),
-                    MasterAgentPlanner._collect_stdout(process, session_ids, stdout_text_chunks),
-                    MasterAgentPlanner._collect_stderr(process, stderr_lines),
+                    MasterAgentPlanner._collect_stdout(
+                        process,
+                        session_ids,
+                        stdout_text_chunks,
+                        request,
+                        process_started_at or cli_start,
+                        first_output_state,
+                    ),
+                    MasterAgentPlanner._collect_stderr(
+                        process,
+                        stderr_lines,
+                        request,
+                        process_started_at or cli_start,
+                        first_output_state,
+                    ),
                 ),
                 timeout=settings.master_agent_timeout_seconds,
             )
@@ -226,10 +276,15 @@ class MasterAgentPlanner:
     async def _collect_stderr(
         process: asyncio.subprocess.Process,
         stderr_lines: list[str],
+        request: UserInputParseRequest | None,
+        process_started_at: float,
+        first_output_state: dict[str, bool],
     ) -> None:
         if process.stderr is None:
             return
         while line := await process.stderr.readline():
+            if request is not None:
+                MasterAgentPlanner._log_first_output(request, process_started_at, first_output_state, "stderr")
             text = line.decode("utf-8", errors="replace").strip()
             if text:
                 stderr_lines.append(text)
@@ -239,10 +294,15 @@ class MasterAgentPlanner:
         process: asyncio.subprocess.Process,
         session_ids: list[str],
         stdout_text_chunks: list[str],
+        request: UserInputParseRequest | None,
+        process_started_at: float,
+        first_output_state: dict[str, bool],
     ) -> None:
         if process.stdout is None:
             return
         while line := await process.stdout.readline():
+            if request is not None:
+                MasterAgentPlanner._log_first_output(request, process_started_at, first_output_state, "stdout")
             decoded = line.decode("utf-8", errors="replace")
             session_id = MasterAgentPlanner._extract_provider_session_id(decoded)
             if session_id:
@@ -327,6 +387,23 @@ class MasterAgentPlanner:
             seen.add(text)
             parts.append(text)
         return "\n".join(parts) if parts else None
+
+    @staticmethod
+    def _log_first_output(
+        request: UserInputParseRequest,
+        process_started_at: float,
+        first_output_state: dict[str, bool],
+        stream: str,
+    ) -> None:
+        if first_output_state.get("logged"):
+            return
+        first_output_state["logged"] = True
+        logger.info(
+            "agent_crossing_perf event=first_output durationMs=%s provider=masteragent invocationId=- taskId=- traceId=%s agentId=masteragent stream=%s",
+            _elapsed_ms(process_started_at),
+            request.trace_id,
+            stream,
+        )
 
     @staticmethod
     def _provider_session_id(request: UserInputParseRequest, session_ids: list[str]) -> str | None:
@@ -428,3 +505,7 @@ class MasterAgentPlanner:
             directAnswer=planning_result.direct_answer,
             providerSessionId=provider_session_id,
         )
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)

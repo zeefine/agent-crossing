@@ -5,8 +5,6 @@ from fastapi import APIRouter, HTTPException
 from agent_runtime.contracts.models import (
     AgentExecutionRequest,
     AgentExecutionResponse,
-    AgentOutputParseRequest,
-    AgentOutputParseResponse,
     ApiResponse,
     HealthResponse,
     UserInputParseRequest,
@@ -41,11 +39,6 @@ async def parse_user_input(request: UserInputParseRequest) -> UserInputParseResp
             status_code=503,
             detail={"code": exception.code, "message": exception.message},
         ) from exception
-
-
-@router.post("/parser/agent-output", response_model=AgentOutputParseResponse)
-async def parse_agent_output(request: AgentOutputParseRequest) -> AgentOutputParseResponse:
-    return parser_service.parse_agent_output(request)
 
 
 @router.post("/runtime/execute", response_model=AgentExecutionResponse)

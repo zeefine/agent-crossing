@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -137,6 +138,70 @@ def test_claudecode_provider_builds_stream_json_command_and_parses_events() -> N
     assert messages[0].content == "answer"
     assert messages[1].content == "tool_use:Read"
     assert messages[-1].raw["providerSessionId"] == "claude-session"
+
+
+def test_claudecode_provider_dedupes_repeated_assistant_snapshots() -> None:
+    provider = ClaudeCodeProvider(
+        command=(
+            f"{sys.executable} -c \"import json; "
+            "event={'type':'assistant','message':{'content':[{'type':'text','text':'same answer'}]}}; "
+            "print(json.dumps(event)); "
+            "print(json.dumps(event)); "
+            "print(json.dumps({'type':'result','subtype':'success'}))\""
+        )
+    )
+    request = execution_request().model_copy(update={"agent_id": "claudecode"})
+
+    messages = asyncio.run(provider.execute(request))
+
+    text_messages = [message for message in messages if message.type == AgentMessageType.TEXT_DELTA]
+    assert [message.content for message in text_messages] == ["same answer"]
+
+
+def test_claudecode_provider_sends_only_delta_for_cumulative_assistant_snapshot() -> None:
+    provider = ClaudeCodeProvider(
+        command=(
+            f"{sys.executable} -c \"import json; "
+            "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'hello'}]}})); "
+            "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'hello world'}]}})); "
+            "print(json.dumps({'type':'result','subtype':'success'}))\""
+        )
+    )
+    request = execution_request().model_copy(update={"agent_id": "claudecode"})
+
+    messages = asyncio.run(provider.execute(request))
+
+    text_messages = [message for message in messages if message.type == AgentMessageType.TEXT_DELTA]
+    assert [message.content for message in text_messages] == ["hello", " world"]
+
+
+def test_claudecode_provider_runs_from_configured_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_cwd = tmp_path / "project-root"
+    cli_cwd.mkdir()
+    cwd_log = tmp_path / "claude-cwd.txt"
+    script = tmp_path / "fake_claude_cwd.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "import pathlib",
+                f"pathlib.Path({str(cwd_log)!r}).write_text(os.getcwd(), encoding='utf-8')",
+                "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'ok'}]}}))",
+            ]
+        )
+    )
+    monkeypatch.setattr(settings, "cli_working_directory", str(cli_cwd))
+    provider = ClaudeCodeProvider(command=f"{sys.executable} {script}")
+    request = execution_request().model_copy(update={"agent_id": "claudecode"})
+
+    messages = asyncio.run(provider.execute(request))
+
+    assert cwd_log.read_text(encoding="utf-8") == str(cli_cwd)
+    assert messages[0].content == "ok"
 
 
 def test_claudecode_provider_uses_provider_session_id_from_request(tmp_path: Path) -> None:
@@ -291,6 +356,33 @@ def test_opencode_provider_builds_plain_command_and_parses_stdout() -> None:
 
     assert [message.type for message in messages] == [AgentMessageType.TEXT_DELTA, AgentMessageType.DONE]
     assert messages[0].content == "answer:hello"
+
+
+def test_opencode_provider_runs_from_configured_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_cwd = tmp_path / "project-root"
+    cli_cwd.mkdir()
+    cwd_log = tmp_path / "opencode-cwd.txt"
+    script = tmp_path / "fake_opencode_cwd.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import os",
+                "import pathlib",
+                f"pathlib.Path({str(cwd_log)!r}).write_text(os.getcwd(), encoding='utf-8')",
+                "print('ok from opencode')",
+            ]
+        )
+    )
+    monkeypatch.setattr(settings, "cli_working_directory", str(cli_cwd))
+    provider = OpenCodeProvider(command=f"{sys.executable} {script}")
+
+    messages = asyncio.run(provider.execute(execution_request()))
+
+    assert cwd_log.read_text(encoding="utf-8") == str(cli_cwd)
+    assert messages[0].content == "ok from opencode"
 
 
 def test_opencode_provider_strips_ansi_and_filters_plain_banner() -> None:
@@ -489,6 +581,18 @@ def test_business_agent_prompt_limits_multi_turn_collaboration_to_next_hop() -> 
     assert "不要一次性预生成剩余轮次或完整 DAG" in opencode_prompt
     assert "每次最多只创建一个下一跳任务" in claudecode_prompt
     assert "不要一次性预生成剩余轮次或完整 DAG" in claudecode_prompt
+
+
+def test_business_agent_prompt_keeps_follow_up_task_context_concise() -> None:
+    opencode_prompt = OpenCodeProvider._build_prompt(execution_request())
+    claudecode_prompt = ClaudeCodeProvider._build_prompt(
+        execution_request().model_copy(update={"agent_id": "claudecode"})
+    )
+
+    for prompt in (opencode_prompt, claudecode_prompt):
+        assert "tasks[].context 只能写下一跳任务的简短指令" in prompt
+        assert "不要复制完整对话历史、长段原文、工具调用结果、JSON 代码块" in prompt
+        assert "平台会在下一次执行前自动注入新增会话历史" in prompt
 
 
 def test_business_agent_static_prompt_falls_back_to_default(
@@ -1015,6 +1119,68 @@ def test_opencode_provider_extracts_latest_assistant_from_session_export() -> No
     assert text == "latest answer"
 
 
+def test_opencode_provider_ignores_plain_tool_status_lines() -> None:
+    provider = OpenCodeProvider(command="opencode")
+
+    messages = provider._stdout_to_messages(
+        execution_request(),
+        "\n".join(
+            [
+                "⚙ agent-crossing-master-agent_get_task_status_snapshot {\"taskId\":\"task-1\"}",
+                "visible answer",
+                "⚙ agent-crossing-master-agent_create_tasks {\"tasks\":[]}",
+            ]
+        ),
+    )
+
+    assert [message.content for message in messages] == ["visible answer"]
+
+
+def test_opencode_provider_strips_plain_invalid_tool_error_blocks() -> None:
+    provider = OpenCodeProvider(command="opencode")
+
+    messages = provider._stdout_to_messages(
+        execution_request(),
+        "\n".join(
+            [
+                "answer before tool error✗ Invalid Tool",
+                "The arguments provided to the tool are invalid: Invalid input",
+                "Error message: JSON Parse error",
+                "answer after tool error",
+            ]
+        ),
+    )
+
+    assert [message.content for message in messages] == ["answer before tool error", "answer after tool error"]
+
+
+def test_opencode_export_text_extraction_skips_tool_parts() -> None:
+    export_payload = {
+        "messages": [
+            {
+                "info": {"role": "assistant", "parentID": "msg-user-current"},
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "agent-crossing-master-agent_get_task_status_snapshot",
+                        "state": {"input": {"taskId": "task-1"}},
+                    },
+                    {"type": "text", "text": "clean answer"},
+                    {
+                        "type": "tool",
+                        "tool": "agent-crossing-master-agent_create_tasks",
+                        "state": {"input": {"tasks": []}},
+                    },
+                ],
+            }
+        ]
+    }
+
+    text = OpenCodeProvider._extract_latest_assistant_text_from_export(json.dumps(export_payload, ensure_ascii=False))
+
+    assert text == "clean answer"
+
+
 def test_opencode_provider_matches_assistant_to_any_new_user_after_baseline() -> None:
     export_payload = {
         "messages": [
@@ -1150,6 +1316,31 @@ def test_opencode_provider_uses_session_list_when_run_omits_session_id(
     assert messages[-1].raw["providerSessionId"] == "ses_newest123"
 
 
+def test_opencode_provider_session_list_timeout_does_not_hang_execute(tmp_path: Path) -> None:
+    script = tmp_path / "fake_opencode_hanging_session_list.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import time",
+                "if 'run' in sys.argv[1:]:",
+                "    pass",
+                "elif sys.argv[1:3] == ['session', 'list']:",
+                "    time.sleep(5)",
+            ]
+        )
+    )
+    provider = OpenCodeProvider(command=f"{sys.executable} {script}", timeout_seconds=0.5)
+
+    started_at = time.monotonic()
+    messages = asyncio.run(provider.execute(execution_request()))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 3
+    assert [message.type for message in messages] == [AgentMessageType.MESSAGE, AgentMessageType.DONE]
+    assert messages[0].raw["sessionExportFallback"]["reason"] == "missing_session_id"
+
+
 def test_opencode_provider_parses_part_event_text(tmp_path: Path) -> None:
     script = tmp_path / "fake_opencode_part_event.py"
     script.write_text(
@@ -1267,20 +1458,32 @@ def test_opencode_provider_treats_tool_event_as_tool_message_when_export_has_no_
     assert messages[1].raw["sessionExportFallback"]["readMode"] == "pty"
 
 
-def test_opencode_provider_injects_callback_environment_without_token() -> None:
-    provider = OpenCodeProvider(
-        command=(
-            f"{sys.executable} -c \"import os; "
-            "print(os.environ['AGENT_CROSSING_INVOCATION_ID']); "
-            "print(os.environ['AGENT_CROSSING_CALLBACK_BASE_URL']); "
-            "print(os.environ.get('AGENT_CROSSING_CALLBACK_TOKEN', 'NO_TOKEN'))\""
+def test_opencode_provider_injects_callback_environment_without_token(tmp_path: Path) -> None:
+    env_log = tmp_path / "opencode-env.json"
+    script = tmp_path / "fake_opencode_env.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "import pathlib",
+                f"pathlib.Path({str(env_log)!r}).write_text(json.dumps({{",
+                "    'invocationId': os.environ['AGENT_CROSSING_INVOCATION_ID'],",
+                "    'callbackBaseUrl': os.environ['AGENT_CROSSING_CALLBACK_BASE_URL'],",
+                "    'callbackToken': os.environ.get('AGENT_CROSSING_CALLBACK_TOKEN', 'NO_TOKEN'),",
+                "}, ensure_ascii=False), encoding='utf-8')",
+                "print('ok')",
+            ]
         )
     )
+    provider = OpenCodeProvider(command=f"{sys.executable} {script}")
 
     messages = asyncio.run(provider.execute(execution_request()))
 
-    assert [message.content for message in messages if message.type == AgentMessageType.TEXT_DELTA] == [
-        "invocation-1",
-        "http://127.0.0.1:8080/api/callback",
-        "NO_TOKEN",
-    ]
+    payload = json.loads(env_log.read_text(encoding="utf-8"))
+    assert payload == {
+        "invocationId": "invocation-1",
+        "callbackBaseUrl": "http://127.0.0.1:8080/api/callback",
+        "callbackToken": "NO_TOKEN",
+    }
+    assert messages[0].content == "ok"
