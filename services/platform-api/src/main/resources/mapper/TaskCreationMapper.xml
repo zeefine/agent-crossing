@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.TaskCreationMapper">
+    <resultMap id="TaskCreationResultMap" type="com.agentcrossing.platform.domain.task.TaskCreation">
+        <constructor>
+            <idArg column="source_task_id" javaType="java.lang.String"/>
+            <idArg column="client_task_id" javaType="java.lang.String"/>
+            <arg column="task_id" javaType="java.lang.String"/>
+            <arg column="user_id" javaType="java.lang.String"/>
+            <arg column="trace_id" javaType="java.lang.String"/>
+            <arg column="idempotency_key" javaType="java.lang.String"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <select id="findBySourceTaskIdAndClientTaskId" resultMap="TaskCreationResultMap">
+        SELECT *
+        FROM task_creation
+        WHERE source_task_id = #{sourceTaskId}
+          AND client_task_id = #{clientTaskId}
+    </select>
+
+    <insert id="insertIgnore" parameterType="com.agentcrossing.platform.domain.task.TaskCreation">
+        INSERT IGNORE INTO task_creation (
+            source_task_id, client_task_id, task_id, user_id, trace_id, idempotency_key, created_at
+        ) VALUES (
+            #{sourceTaskId}, #{clientTaskId}, #{taskId}, #{userId}, #{traceId}, #{idempotencyKey},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+    </insert>
+
+    <delete id="deleteByTraceIdAndUserId">
+        DELETE FROM task_creation
+        WHERE trace_id = #{traceId}
+          AND user_id = #{userId}
+    </delete>
+</mapper>

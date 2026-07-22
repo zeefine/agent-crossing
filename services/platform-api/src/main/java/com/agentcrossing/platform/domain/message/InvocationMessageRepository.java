@@ -5,6 +5,8 @@ import java.util.List;
 public interface InvocationMessageRepository {
     InvocationMessage save(InvocationMessage message);
 
+    boolean saveIfAbsent(InvocationMessage message);
+
     List<InvocationMessage> findByInvocationId(String invocationId);
 
     List<InvocationMessage> findByTraceId(String traceId);

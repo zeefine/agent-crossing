@@ -2,6 +2,7 @@ package com.agentcrossing.platform.application.chat;
 
 import com.agentcrossing.platform.application.realtime.RealtimeEventTypes;
 import com.agentcrossing.platform.application.parser.QuestParserService;
+import com.agentcrossing.platform.application.parser.ThreadExecutionSummary;
 import com.agentcrossing.platform.application.parser.UserInputEnqueueResult;
 import com.agentcrossing.platform.application.parser.UserInputParseResult;
 import com.agentcrossing.platform.domain.context.AgentContextCursorRepository;
@@ -20,11 +21,14 @@ import com.agentcrossing.platform.domain.message.InvocationMessageRepository;
 import com.agentcrossing.platform.domain.queue.QuestHub;
 import com.agentcrossing.platform.domain.session.AgentSessionRepository;
 import com.agentcrossing.platform.domain.task.Task;
+import com.agentcrossing.platform.domain.task.TaskCreationRepository;
 import com.agentcrossing.platform.domain.task.TaskDependencyRepository;
 import com.agentcrossing.platform.domain.task.TaskRepository;
 import com.agentcrossing.platform.domain.task.TaskStatus;
 import com.agentcrossing.platform.domain.user.UserRepository;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -44,6 +48,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class ChatService {
     public static final String MASTER_AGENT_ID = "masteragent";
+    private static final int MASTER_SUMMARY_TASK_LIMIT = 12;
+    private static final int MASTER_SUMMARY_CONCLUSION_LIMIT = 6;
+    private static final int MASTER_SUMMARY_TASK_CONTEXT_CHARS = 240;
+    private static final int MASTER_SUMMARY_CONCLUSION_CHARS = 500;
     private static final Logger log = LoggerFactory.getLogger(ChatService.class);
 
     private final ChatThreadRepository chatThreadRepository;
@@ -55,11 +63,14 @@ public class ChatService {
     private final InvocationMessageRepository invocationMessageRepository;
     private final InvocationRepository invocationRepository;
     private final TaskRepository taskRepository;
+    private final TaskCreationRepository taskCreationRepository;
     private final TaskDependencyRepository taskDependencyRepository;
     private final AgentContextCursorRepository agentContextCursorRepository;
     private final AgentSessionRepository agentSessionRepository;
     private final QuestHub questHub;
     private final Executor chatPlanningExecutor;
+    private final ThreadPlanningQueue threadPlanningQueue;
+    private final ThreadStatusAggregator threadStatusAggregator;
     private final TransactionTemplate transactionTemplate;
 
     public ChatService(
@@ -70,6 +81,7 @@ public class ChatService {
                 chatThreadRepository,
                 chatMessageRepository,
                 questParserService,
+                null,
                 null,
                 null,
                 null,
@@ -103,6 +115,7 @@ public class ChatService {
                 null,
                 null,
                 null,
+                null,
                 Runnable::run,
                 (TransactionTemplate) null);
     }
@@ -118,11 +131,14 @@ public class ChatService {
             InvocationMessageRepository invocationMessageRepository,
             InvocationRepository invocationRepository,
             TaskRepository taskRepository,
+            TaskCreationRepository taskCreationRepository,
             TaskDependencyRepository taskDependencyRepository,
             AgentContextCursorRepository agentContextCursorRepository,
             AgentSessionRepository agentSessionRepository,
             QuestHub questHub,
             @Qualifier("chatPlanningExecutor") Executor chatPlanningExecutor,
+            ThreadPlanningQueue threadPlanningQueue,
+            ThreadStatusAggregator threadStatusAggregator,
             ObjectProvider<PlatformTransactionManager> transactionManagerProvider) {
         this(
                 chatThreadRepository,
@@ -134,6 +150,7 @@ public class ChatService {
                 invocationMessageRepository,
                 invocationRepository,
                 taskRepository,
+                taskCreationRepository,
                 taskDependencyRepository,
                 agentContextCursorRepository,
                 agentSessionRepository,
@@ -141,7 +158,9 @@ public class ChatService {
                 chatPlanningExecutor,
                 transactionManagerProvider.getIfAvailable() == null
                         ? null
-                        : new TransactionTemplate(transactionManagerProvider.getIfAvailable()));
+                        : new TransactionTemplate(transactionManagerProvider.getIfAvailable()),
+                threadPlanningQueue,
+                threadStatusAggregator);
     }
 
     ChatService(
@@ -160,6 +179,84 @@ public class ChatService {
             QuestHub questHub,
             Executor chatPlanningExecutor,
             TransactionTemplate transactionTemplate) {
+        this(
+                chatThreadRepository,
+                chatMessageRepository,
+                questParserService,
+                chatEventService,
+                eventLogRepository,
+                userRepository,
+                invocationMessageRepository,
+                invocationRepository,
+                taskRepository,
+                null,
+                taskDependencyRepository,
+                agentContextCursorRepository,
+                agentSessionRepository,
+                questHub,
+                chatPlanningExecutor,
+                transactionTemplate,
+                null,
+                null);
+    }
+
+    ChatService(
+            ChatThreadRepository chatThreadRepository,
+            ChatMessageRepository chatMessageRepository,
+            QuestParserService questParserService,
+            ChatEventService chatEventService,
+            EventLogRepository eventLogRepository,
+            UserRepository userRepository,
+            InvocationMessageRepository invocationMessageRepository,
+            InvocationRepository invocationRepository,
+            TaskRepository taskRepository,
+            TaskCreationRepository taskCreationRepository,
+            TaskDependencyRepository taskDependencyRepository,
+            AgentContextCursorRepository agentContextCursorRepository,
+            AgentSessionRepository agentSessionRepository,
+            QuestHub questHub,
+            Executor chatPlanningExecutor,
+            TransactionTemplate transactionTemplate) {
+        this(
+                chatThreadRepository,
+                chatMessageRepository,
+                questParserService,
+                chatEventService,
+                eventLogRepository,
+                userRepository,
+                invocationMessageRepository,
+                invocationRepository,
+                taskRepository,
+                taskCreationRepository,
+                taskDependencyRepository,
+                agentContextCursorRepository,
+                agentSessionRepository,
+                questHub,
+                chatPlanningExecutor,
+                transactionTemplate,
+                null,
+                null);
+    }
+
+    private ChatService(
+            ChatThreadRepository chatThreadRepository,
+            ChatMessageRepository chatMessageRepository,
+            QuestParserService questParserService,
+            ChatEventService chatEventService,
+            EventLogRepository eventLogRepository,
+            UserRepository userRepository,
+            InvocationMessageRepository invocationMessageRepository,
+            InvocationRepository invocationRepository,
+            TaskRepository taskRepository,
+            TaskCreationRepository taskCreationRepository,
+            TaskDependencyRepository taskDependencyRepository,
+            AgentContextCursorRepository agentContextCursorRepository,
+            AgentSessionRepository agentSessionRepository,
+            QuestHub questHub,
+            Executor chatPlanningExecutor,
+            TransactionTemplate transactionTemplate,
+            ThreadPlanningQueue threadPlanningQueue,
+            ThreadStatusAggregator threadStatusAggregator) {
         this.chatThreadRepository = chatThreadRepository;
         this.chatMessageRepository = chatMessageRepository;
         this.questParserService = questParserService;
@@ -169,11 +266,23 @@ public class ChatService {
         this.invocationMessageRepository = invocationMessageRepository;
         this.invocationRepository = invocationRepository;
         this.taskRepository = taskRepository;
+        this.taskCreationRepository = taskCreationRepository;
         this.taskDependencyRepository = taskDependencyRepository;
         this.agentContextCursorRepository = agentContextCursorRepository;
         this.agentSessionRepository = agentSessionRepository;
         this.questHub = questHub;
         this.chatPlanningExecutor = chatPlanningExecutor;
+        this.threadPlanningQueue = threadPlanningQueue == null
+                ? new ThreadPlanningQueue(chatPlanningExecutor)
+                : threadPlanningQueue;
+        this.threadStatusAggregator = threadStatusAggregator == null
+                ? new ThreadStatusAggregator(
+                        chatThreadRepository,
+                        taskRepository,
+                        invocationRepository,
+                        this.threadPlanningQueue,
+                        chatEventService)
+                : threadStatusAggregator;
         this.transactionTemplate = transactionTemplate;
     }
 
@@ -219,9 +328,10 @@ public class ChatService {
             thread = chatThreadRepository.updateTitle(thread.threadId(), deriveTitle(content));
             publishThread(thread);
         }
-        thread = chatThreadRepository.updateStatus(thread.threadId(), ChatThreadStatus.RUNNING);
-        publishThread(thread);
-        schedulePlanningAfterCommit(userId, thread.threadId(), content);
+        // 先在内存规划队列中预留，再聚合为 RUNNING；这样事务提交前的短窗口也不会被旧 task 标成 COMPLETED。
+        long planningGeneration = threadPlanningQueue.reserve(userId, thread.threadId());
+        thread = threadStatusAggregator.refresh(userId, thread.threadId()).orElse(thread);
+        schedulePlanningAfterCommit(userId, thread.threadId(), content, planningGeneration);
         return new ChatSubmitResult(thread, userMessage, null, List.of());
     }
 
@@ -231,6 +341,7 @@ public class ChatService {
                 .findByThreadIdAndUserId(threadId, userId)
                 .orElseThrow(() -> new IllegalArgumentException("Chat thread not found: " + threadId));
         String traceId = thread.traceId();
+        threadPlanningQueue.remove(userId, threadId);
         List<Task> traceTasks = taskRepository == null
                 ? List.of()
                 : taskRepository.findByTraceIdAndUserId(traceId, userId);
@@ -249,6 +360,9 @@ public class ChatService {
         }
         if (invocationRepository != null) {
             invocationRepository.deleteByTraceIdAndUserId(traceId, userId);
+        }
+        if (taskCreationRepository != null) {
+            taskCreationRepository.deleteByTraceIdAndUserId(traceId, userId);
         }
         if (taskDependencyRepository != null) {
             taskDependencyRepository.deleteByTaskIds(traceTaskIds);
@@ -296,8 +410,23 @@ public class ChatService {
         }
     }
 
-    private void schedulePlanningAfterCommit(String userId, String threadId, String content) {
-        Runnable schedule = () -> chatPlanningExecutor.execute(() -> processUserInput(userId, threadId, content));
+    private void schedulePlanningAfterCommit(String userId, String threadId, String content, long planningGeneration) {
+        Runnable schedule = () -> threadPlanningQueue.enqueueReserved(
+                userId,
+                threadId,
+                planningGeneration,
+                () -> processUserInput(userId, threadId, content, planningGeneration),
+                failure -> runInTransaction(() -> {
+                    if (threadPlanningQueue.isCurrent(userId, threadId, planningGeneration)) {
+                        markPlanningFailed(
+                                userId,
+                                threadId,
+                                failure instanceof Exception exception
+                                        ? exception
+                                        : new IllegalStateException("Thread planning execution failed", failure));
+                    }
+                }),
+                () -> runInTransaction(() -> completeThreadIfIdle(userId, threadId)));
         if (TransactionSynchronizationManager.isActualTransactionActive()
                 && TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -305,20 +434,34 @@ public class ChatService {
                 public void afterCommit() {
                     schedule.run();
                 }
+
+                @Override
+                public void afterCompletion(int status) {
+                    if (status != TransactionSynchronization.STATUS_COMMITTED) {
+                        if (threadPlanningQueue.cancelReservation(userId, threadId, planningGeneration)) {
+                            runInTransaction(() -> completeThreadIfIdle(userId, threadId));
+                        }
+                    }
+                }
             });
             return;
         }
         schedule.run();
     }
 
-    private void processUserInput(String userId, String threadId, String content) {
+    private void processUserInput(String userId, String threadId, String content, long planningGeneration) {
         long planningStartedAt = System.nanoTime();
         try {
             ChatThread thread = chatThreadRepository
                     .findByThreadIdAndUserId(threadId, userId)
                     .orElseThrow(() -> new IllegalArgumentException("Chat thread not found: " + threadId));
-            UserInputParseResult parseResult =
-                    questParserService.parseUserInput(userId, thread.threadId(), thread.traceId(), content);
+            ThreadExecutionSummary executionSummary = buildThreadExecutionSummary(thread);
+            UserInputParseResult parseResult = questParserService.parseUserInput(
+                    userId,
+                    thread.threadId(),
+                    thread.traceId(),
+                    content,
+                    executionSummary);
             log.info(
                     "agent_crossing_perf event=master_agent_planning durationMs={} userId={} threadId={} traceId={} tasks={} directAnswer={}",
                     elapsedMs(planningStartedAt),
@@ -327,14 +470,26 @@ public class ChatService {
                     thread.traceId(),
                     parseResult.tasks().size(),
                     parseResult.directAnswer() != null);
-            runInTransaction(() -> savePlanningResult(userId, threadId, thread.traceId(), parseResult));
+            if (!threadPlanningQueue.isCurrent(userId, threadId, planningGeneration)) {
+                log.info("Discarded canceled MasterAgent planning result userId={} threadId={}", userId, threadId);
+                return;
+            }
+            runInTransaction(() -> {
+                if (threadPlanningQueue.isCurrent(userId, threadId, planningGeneration)) {
+                    savePlanningResult(userId, threadId, thread.traceId(), parseResult);
+                }
+            });
         } catch (Exception exception) {
             log.info(
                     "agent_crossing_perf event=master_agent_planning_failed durationMs={} userId={} threadId={}",
                     elapsedMs(planningStartedAt),
                     userId,
                     threadId);
-            runInTransaction(() -> markPlanningFailed(userId, threadId, exception));
+            runInTransaction(() -> {
+                if (threadPlanningQueue.isCurrent(userId, threadId, planningGeneration)) {
+                    markPlanningFailed(userId, threadId, exception);
+                }
+            });
         }
     }
 
@@ -376,10 +531,7 @@ public class ChatService {
                     answerTime));
             publishChatMessage(assistantMessage);
         }
-        if (enqueueResult.tasks().isEmpty()) {
-            ChatThread completed = chatThreadRepository.updateStatus(thread.threadId(), ChatThreadStatus.COMPLETED);
-            publishThread(completed);
-        }
+        threadStatusAggregator.refresh(userId, thread.threadId());
     }
 
     private void markPlanningFailed(String userId, String threadId, Exception exception) {
@@ -401,8 +553,15 @@ public class ChatService {
                 now,
                 now));
         publishChatMessage(failedMessage);
-        ChatThread failed = chatThreadRepository.updateStatus(thread.threadId(), ChatThreadStatus.FAILED);
-        publishThread(failed);
+        if (threadPlanningQueue.hasPendingAfterCurrent(userId, threadId)) {
+            threadStatusAggregator.refresh(userId, threadId);
+            return;
+        }
+        threadStatusAggregator.markPlanningFailed(userId, threadId);
+    }
+
+    private void completeThreadIfIdle(String userId, String threadId) {
+        threadStatusAggregator.refresh(userId, threadId);
     }
 
     private void publishThread(ChatThread thread) {
@@ -436,6 +595,54 @@ public class ChatService {
             return "New chat";
         }
         return normalized.length() <= 48 ? normalized : normalized.substring(0, 48);
+    }
+
+    private ThreadExecutionSummary buildThreadExecutionSummary(ChatThread thread) {
+        List<Task> tasks = taskRepository == null
+                ? List.of()
+                : taskRepository.findByTraceIdAndUserId(thread.traceId(), thread.userId());
+        Map<String, Integer> statusCounts = new LinkedHashMap<>();
+        for (Task task : tasks) {
+            statusCounts.merge(task.status().wireValue(), 1, Integer::sum);
+        }
+        List<ThreadExecutionSummary.TaskSummary> recentTasks = tasks.stream()
+                .sorted(Comparator.comparing(Task::updatedAt).reversed())
+                .limit(MASTER_SUMMARY_TASK_LIMIT)
+                .map(task -> new ThreadExecutionSummary.TaskSummary(
+                        task.taskId(),
+                        task.agentId(),
+                        task.status().wireValue(),
+                        compactText(task.context(), MASTER_SUMMARY_TASK_CONTEXT_CHARS),
+                        task.updatedAt().toString()))
+                .toList();
+        Map<String, ChatMessage> latestConclusionByAgent = new LinkedHashMap<>();
+        chatMessageRepository
+                .findByThreadId(thread.threadId())
+                .stream()
+                .filter(message -> message.role() == ChatMessageRole.ASSISTANT)
+                .filter(message -> message.status() == ChatMessageStatus.COMPLETED)
+                .filter(message -> message.agentId() != null && !message.agentId().isBlank())
+                .filter(message -> !MASTER_AGENT_ID.equals(message.agentId()))
+                .sorted(Comparator.comparing(ChatMessage::createdAt).reversed())
+                .forEach(message -> latestConclusionByAgent.putIfAbsent(message.agentId(), message));
+        List<ThreadExecutionSummary.AgentConclusion> latestConclusions = latestConclusionByAgent.values().stream()
+                .limit(MASTER_SUMMARY_CONCLUSION_LIMIT)
+                .map(message -> new ThreadExecutionSummary.AgentConclusion(
+                        message.agentId(),
+                        message.taskId(),
+                        compactText(message.content(), MASTER_SUMMARY_CONCLUSION_CHARS),
+                        message.createdAt().toString()))
+                .toList();
+        return new ThreadExecutionSummary(
+                thread.status().wireValue(),
+                statusCounts,
+                recentTasks,
+                latestConclusions);
+    }
+
+    private static String compactText(String content, int maxChars) {
+        String normalized = content == null ? "" : content.strip().replaceAll("\\s+", " ");
+        return normalized.length() <= maxChars ? normalized : normalized.substring(0, maxChars) + "...";
     }
 
     private static long elapsedMs(long startedAtNanos) {

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import time
 from collections.abc import Awaitable, Callable
@@ -12,9 +13,13 @@ from agent_runtime.master_agent.errors import MasterAgentPlanningError
 from agent_runtime.master_agent.models import PlannedTask
 from agent_runtime.master_agent.planning_sessions import PlanningResult, PlanningSessionStore, planning_session_store
 from agent_runtime.prompt_config import load_prompt_config
+from agent_runtime.prompt_sections import format_agent_directory
 
 
 logger = logging.getLogger(__name__)
+
+SELF_ORCHESTRATION_CONTRACT_START = "[Self-Orchestration Contract]"
+SELF_ORCHESTRATION_CONTRACT_END = "[/Self-Orchestration Contract]"
 
 
 class MasterAgentPlanner:
@@ -33,6 +38,8 @@ class MasterAgentPlanner:
                 "MasterAgent is disabled; user input cannot be planned.",
             )
 
+        prompt_version = load_prompt_config().master_agent_prompt_version()
+        request = self._prepare_request(request, prompt_version)
         session = self._session_store.create()
         process_task: asyncio.Task[int] | None = None
         plan_task: asyncio.Task[PlanningResult] | None = None
@@ -79,13 +86,23 @@ class MasterAgentPlanner:
             )
             if plan_task in done:
                 planning_result = plan_task.result()
-                return self._to_response(planning_result, request, self._provider_session_id(request, session_ids))
+                return self._to_response(
+                    planning_result,
+                    request,
+                    self._provider_session_id(request, session_ids),
+                    prompt_version,
+                )
 
             if process_task in done and not plan_task.done():
                 return_code = process_task.result()
                 try:
                     planning_result = await asyncio.wait_for(plan_task, timeout=0.5)
-                    return self._to_response(planning_result, request, self._provider_session_id(request, session_ids))
+                    return self._to_response(
+                        planning_result,
+                        request,
+                        self._provider_session_id(request, session_ids),
+                        prompt_version,
+                    )
                 except TimeoutError:
                     stdout_answer = self._stdout_direct_answer(stdout_text_chunks)
                     if return_code == 0 and stdout_answer:
@@ -93,6 +110,7 @@ class MasterAgentPlanner:
                             tasks=[],
                             directAnswer=stdout_answer,
                             providerSessionId=self._provider_session_id(request, session_ids),
+                            promptVersion=prompt_version,
                         )
                     if return_code != 0:
                         raise MasterAgentPlanningError(
@@ -110,6 +128,7 @@ class MasterAgentPlanner:
                     tasks=[],
                     directAnswer=stdout_answer,
                     providerSessionId=self._provider_session_id(request, session_ids),
+                    promptVersion=prompt_version,
                 )
             raise MasterAgentPlanningError(
                 "MASTER_AGENT_TIMEOUT",
@@ -136,6 +155,10 @@ class MasterAgentPlanner:
             self._session_store.discard(session.planning_session_id)
 
     def _build_command(self, planning_session_id: str, request: UserInputParseRequest) -> list[str]:
+        request = self._prepare_request(
+            request,
+            load_prompt_config().master_agent_prompt_version(),
+        )
         command = shlex.split(settings.master_agent_command)
         if not command:
             return []
@@ -159,6 +182,30 @@ class MasterAgentPlanner:
         return args
 
     @staticmethod
+    def _prepare_request(
+        request: UserInputParseRequest,
+        current_prompt_version: str,
+    ) -> UserInputParseRequest:
+        if (
+            request.provider_session_id
+            and request.provider_prompt_version == current_prompt_version
+        ):
+            return request
+        if not request.provider_session_id:
+            return request
+        logger.info(
+            "Rotating MasterAgent session because the static prompt version changed: threadId=%s traceId=%s",
+            request.thread_id,
+            request.trace_id,
+        )
+        return request.model_copy(
+            update={
+                "provider_session_id": None,
+                "provider_prompt_version": None,
+            }
+        )
+
+    @staticmethod
     def _mcp_config_json() -> str | None:
         if settings.claudecode_mcp_config_json:
             return settings.claudecode_mcp_config_json
@@ -178,16 +225,25 @@ class MasterAgentPlanner:
 
     @staticmethod
     def _build_prompt(planning_session_id: str, request: UserInputParseRequest) -> str:
-        available_agents = json.dumps(
-            [agent.model_dump(mode="json", by_alias=True) for agent in request.available_agents],
-            ensure_ascii=False,
-        )
-        static_prompt = load_prompt_config().master_agent_static_prompt.strip()
+        agent_directory = format_agent_directory(request.available_agents)
+        execution_summary = ""
+        if request.thread_execution_summary is not None:
+            summary_json = json.dumps(
+                request.thread_execution_summary.model_dump(mode="json", by_alias=True),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            execution_summary = f"[Thread Execution Summary]\n{summary_json}\n\n"
+        static_section = ""
+        if not request.provider_session_id:
+            static_prompt = load_prompt_config().master_agent_static_prompt.strip()
+            static_section = f"{static_prompt}\n\n"
         return (
-            f"{static_prompt}\n\n"
+            f"{static_section}"
             "[Planning Context]\n"
-            f"planningSessionId: {planning_session_id}\n"
-            f"availableAgents: {available_agents}\n\n"
+            f"planningSessionId: {planning_session_id}\n\n"
+            f"{agent_directory}"
+            f"{execution_summary}"
             f"[User Input]\n{request.input}\n"
         )
 
@@ -474,10 +530,11 @@ class MasterAgentPlanner:
 
     @staticmethod
     def _seed_only_for_self_orchestration(tasks: list[ParsedTask], request: UserInputParseRequest) -> list[ParsedTask]:
-        if len(tasks) <= 1 or not MasterAgentPlanner._requires_agent_self_orchestration(request.input):
+        if not tasks or not MasterAgentPlanner._requires_agent_self_orchestration(request.input):
             return tasks
 
         seed_task = next((task for task in tasks if not task.depends_on), tasks[0])
+        contract = MasterAgentPlanner._self_orchestration_contract(request)
         return [
             seed_task.model_copy(
                 update={
@@ -486,17 +543,55 @@ class MasterAgentPlanner:
                         f"{seed_task.context}\n\n"
                         "执行约束：这是一个多 agent 自组织互动任务。你只负责当前轮次；"
                         "如果需要继续互动，请在完成当前回复后只创建一个下一跳任务，"
-                        "不要一次性创建剩余轮次或完整 DAG。"
+                        "不要一次性创建剩余轮次或完整 DAG。\n\n"
+                        f"{contract}"
                     ),
                 }
             )
         ]
 
     @staticmethod
+    def _self_orchestration_contract(request: UserInputParseRequest) -> str:
+        normalized_input = request.input.lower()
+        participants = sorted(
+            (
+                (normalized_input.find(agent.agent_id.lower()), agent.agent_id)
+                for agent in request.available_agents
+                if normalized_input.find(agent.agent_id.lower()) >= 0
+            ),
+            key=lambda item: item[0],
+        )
+        participant_ids = [agent_id for _, agent_id in participants]
+        round_match = re.search(r"(?<!\d)(\d+)\s*轮", request.input)
+        turns_per_participant = int(round_match.group(1)) if round_match else None
+        requires_final_result = any(
+            keyword in request.input
+            for keyword in ("最后有结果", "最后给出结果", "最后总结", "最终结果", "最终结论", "辩论结果")
+        )
+        contract_payload = {
+            "originalRequest": request.input,
+            "participants": participant_ids,
+            "turnsPerParticipant": turns_per_participant,
+            "requiresFinalResult": requires_final_result,
+        }
+        return (
+            f"{SELF_ORCHESTRATION_CONTRACT_START}\n"
+            f"{json.dumps(contract_payload, ensure_ascii=False, separators=(',', ':'))}\n"
+            "- N 轮表示每个参与者都必须各完成 N 次用户可见发言，不是所有参与者合计 N 次。\n"
+            "- 完成当前发言后，根据会话历史核对每个参与者的已完成次数；仍有人未达到目标时，"
+            "必须通过 MCP 只创建该参与者的一个下一跳任务。\n"
+            "- 只有所有参与者都达到目标后才可停止互动；若 requiresFinalResult=true，"
+            "最后一位发言者还必须创建一个独立总结任务，总结任务不得继续追加。\n"
+            "- 平台会把本契约原样继承到下一跳任务，任务不得删除、缩减或改写这些完成条件。\n"
+            f"{SELF_ORCHESTRATION_CONTRACT_END}"
+        )
+
+    @staticmethod
     def _to_response(
         planning_result: PlanningResult,
         request: UserInputParseRequest,
         provider_session_id: str | None = None,
+        prompt_version: str | None = None,
     ) -> UserInputParseResponse:
         tasks = MasterAgentPlanner._to_parsed_tasks(planning_result.tasks, request)
         tasks = MasterAgentPlanner._seed_only_for_self_orchestration(tasks, request)
@@ -504,6 +599,7 @@ class MasterAgentPlanner:
             tasks=tasks,
             directAnswer=planning_result.direct_answer,
             providerSessionId=provider_session_id,
+            promptVersion=prompt_version,
         )
 
 

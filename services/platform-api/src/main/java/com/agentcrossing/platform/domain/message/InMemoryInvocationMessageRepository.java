@@ -11,11 +11,33 @@ import org.springframework.stereotype.Repository;
 @ConditionalOnProperty(name = "agent-crossing.storage-mode", havingValue = "memory", matchIfMissing = true)
 public class InMemoryInvocationMessageRepository implements InvocationMessageRepository {
     private final ConcurrentMap<String, InvocationMessage> messages = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, String> messageIdByInvocationSequence = new ConcurrentHashMap<>();
 
     @Override
     public InvocationMessage save(InvocationMessage message) {
         messages.put(message.messageId(), message);
+        if (message.sequence() != null) {
+            messageIdByInvocationSequence.put(sequenceKey(message.invocationId(), message.sequence()), message.messageId());
+        }
         return message;
+    }
+
+    @Override
+    public boolean saveIfAbsent(InvocationMessage message) {
+        String sequenceKey = message.sequence() == null
+                ? null
+                : sequenceKey(message.invocationId(), message.sequence());
+        if (sequenceKey != null
+                && messageIdByInvocationSequence.putIfAbsent(sequenceKey, message.messageId()) != null) {
+            return false;
+        }
+        if (messages.putIfAbsent(message.messageId(), message) != null) {
+            if (sequenceKey != null) {
+                messageIdByInvocationSequence.remove(sequenceKey, message.messageId());
+            }
+            return false;
+        }
+        return true;
     }
 
     @Override
@@ -44,7 +66,17 @@ public class InMemoryInvocationMessageRepository implements InvocationMessageRep
 
     @Override
     public void deleteByTraceIdAndUserId(String traceId, String userId) {
-        messages.values().removeIf(message -> message.traceId().equals(traceId)
-                && message.userId().equals(userId));
+        messages.values().removeIf(message -> {
+            boolean matches = message.traceId().equals(traceId) && message.userId().equals(userId);
+            if (matches && message.sequence() != null) {
+                messageIdByInvocationSequence.remove(
+                        sequenceKey(message.invocationId(), message.sequence()), message.messageId());
+            }
+            return matches;
+        });
+    }
+
+    private static String sequenceKey(String invocationId, long sequence) {
+        return invocationId + "\u0000" + sequence;
     }
 }

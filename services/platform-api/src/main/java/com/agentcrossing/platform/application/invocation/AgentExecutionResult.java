@@ -3,7 +3,31 @@ package com.agentcrossing.platform.application.invocation;
 import java.util.List;
 import java.util.Map;
 
-public record AgentExecutionResult(List<AgentMessage> messages) {
+public record AgentExecutionResult(
+        List<AgentMessage> messages,
+        String finalText,
+        boolean streamCompleted,
+        Long lastSequence,
+        String promptVersion) {
+    public AgentExecutionResult {
+        messages = messages == null ? List.of() : List.copyOf(messages);
+        if (promptVersion == null || promptVersion.isBlank()) {
+            promptVersion = promptVersionFromMessages(messages);
+        }
+    }
+
+    public AgentExecutionResult(List<AgentMessage> messages) {
+        this(messages, null, false, null, null);
+    }
+
+    public AgentExecutionResult(
+            List<AgentMessage> messages,
+            String finalText,
+            boolean streamCompleted,
+            Long lastSequence) {
+        this(messages, finalText, streamCompleted, lastSequence, null);
+    }
+
     public boolean hasError() {
         return messages.stream().anyMatch(message -> message.type() == AgentMessageType.ERROR);
     }
@@ -44,6 +68,18 @@ public record AgentExecutionResult(List<AgentMessage> messages) {
                 }
                 if (value instanceof String sessionId && !sessionId.isBlank()) {
                     return sessionId;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String promptVersionFromMessages(List<AgentMessage> messages) {
+        for (AgentMessage message : messages) {
+            if (message.raw() instanceof Map<?, ?> raw) {
+                Object value = raw.get("promptVersion");
+                if (value instanceof String promptVersion && !promptVersion.isBlank()) {
+                    return promptVersion;
                 }
             }
         }

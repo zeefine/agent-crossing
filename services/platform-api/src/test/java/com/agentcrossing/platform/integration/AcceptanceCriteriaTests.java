@@ -192,7 +192,6 @@ class AcceptanceCriteriaTests {
                     invocationRepository,
                     taskRepository,
                     runtimeClient,
-                    parserService,
                     "http://127.0.0.1:8080/api/callback",
                     com.agentcrossing.platform.application.routing.TaskDispatchSignal.NOOP,
                     null,

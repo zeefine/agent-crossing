@@ -14,7 +14,22 @@ public record InvocationMessage(
         AgentMessageType type,
         String content,
         Object raw,
+        Long sequence,
         Instant createdAt) {
+    public InvocationMessage(
+            String messageId,
+            String userId,
+            String invocationId,
+            String taskId,
+            String traceId,
+            String agentId,
+            AgentMessageType type,
+            String content,
+            Object raw,
+            Instant createdAt) {
+        this(messageId, userId, invocationId, taskId, traceId, agentId, type, content, raw, null, createdAt);
+    }
+
     public InvocationMessage {
         Objects.requireNonNull(messageId, "messageId must not be null");
         Objects.requireNonNull(userId, "userId must not be null");

@@ -108,6 +108,32 @@ class QuestParserServiceTests {
     }
 
     @Test
+    void appendedTasksInheritTheAuthoritativeSelfOrchestrationContract() {
+        String contract = """
+                [Self-Orchestration Contract]
+                {"originalRequest":"debate","participants":["claudecode","opencode"],"turnsPerParticipant":3,"requiresFinalResult":true}
+                rules
+                [/Self-Orchestration Contract]
+                """.strip();
+        Task sourceTask = sourceTask(0, "first turn\n\n" + contract);
+        taskRepository.save(sourceTask);
+
+        List<Task> tasks = service.appendAgentTasks(
+                sourceTask,
+                List.of(new ParsedTask(
+                        "task-child",
+                        "opencode",
+                        "second turn\n\n[Self-Orchestration Contract]\nturnsPerParticipant: 2\n[/Self-Orchestration Contract]",
+                        List.of())));
+
+        assertThat(tasks).hasSize(1);
+        assertThat(tasks.getFirst().context())
+                .isEqualTo("second turn\n\n" + contract)
+                .contains("\"turnsPerParticipant\":3")
+                .doesNotContain("turnsPerParticipant: 2");
+    }
+
+    @Test
     void dropsAppendedAgentTasksRejectedByLoopGuard() {
         Task sourceTask = sourceTask(10);
         taskRepository.save(sourceTask);
@@ -121,7 +147,45 @@ class QuestParserServiceTests {
         assertThat(taskRepository.findByTaskId("too-deep")).isEmpty();
     }
 
+    @Test
+    void sameClientTaskIdReturnsTheOriginalTaskWithoutReenqueuingEvenWithAnotherRequestKey() {
+        Task sourceTask = sourceTask(0);
+        taskRepository.save(sourceTask);
+        List<ParsedTask> request = List.of(new ParsedTask("task-next", "opencode", "continue", List.of()));
+
+        List<Task> first = service.appendAgentTasks(sourceTask, request, "append-source-task-1");
+        List<Task> retry = service.appendAgentTasks(sourceTask, request, "append-source-task-retry");
+
+        assertThat(first).hasSize(1);
+        assertThat(retry).containsExactly(first.getFirst());
+        assertThat(first.getFirst().taskId()).startsWith("agent-task-");
+        assertThat(taskRepository.findAll()).hasSize(2);
+        assertThat(questHub.snapshot()).containsExactly(first.getFirst().taskId());
+    }
+
+    @Test
+    void clientTaskDependenciesResolveToTheCreatedPlatformTaskIds() {
+        Task sourceTask = sourceTask(0);
+        taskRepository.save(sourceTask);
+
+        List<Task> created = service.appendAgentTasks(
+                sourceTask,
+                List.of(
+                        new ParsedTask("task-first", "opencode", "first", List.of()),
+                        new ParsedTask("task-second", "opencode", "second", List.of("task-first"))),
+                "append-source-task-2");
+
+        Task first = created.getFirst();
+        Task second = created.get(1);
+        assertThat(taskDependencyRepository.findParentTaskIds(first.taskId())).containsExactly(sourceTask.taskId());
+        assertThat(taskDependencyRepository.findParentTaskIds(second.taskId())).containsExactly(first.taskId());
+    }
+
     private static Task sourceTask(int depth) {
+        return sourceTask(depth, "source");
+    }
+
+    private static Task sourceTask(int depth, String context) {
         Instant now = Instant.now();
         return new Task(
                 "source-task",
@@ -132,7 +196,7 @@ class QuestParserServiceTests {
                 TaskSource.USER,
                 depth,
                 "opencode",
-                "source",
+                context,
                 now,
                 now);
     }

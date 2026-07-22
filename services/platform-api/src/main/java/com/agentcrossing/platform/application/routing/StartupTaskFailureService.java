@@ -2,7 +2,8 @@ package com.agentcrossing.platform.application.routing;
 
 import com.agentcrossing.platform.domain.chat.ChatThread;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
-import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
+import com.agentcrossing.platform.application.chat.ThreadPlanningQueue;
+import com.agentcrossing.platform.application.chat.ThreadStatusAggregator;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
 import com.agentcrossing.platform.domain.invocation.InvocationStatus;
@@ -16,6 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -25,14 +27,34 @@ public class StartupTaskFailureService {
     private final TaskRepository taskRepository;
     private final InvocationRepository invocationRepository;
     private final ChatThreadRepository chatThreadRepository;
+    private final ThreadStatusAggregator threadStatusAggregator;
 
     public StartupTaskFailureService(
             TaskRepository taskRepository,
             InvocationRepository invocationRepository,
             ChatThreadRepository chatThreadRepository) {
+        this(
+                taskRepository,
+                invocationRepository,
+                chatThreadRepository,
+                new ThreadStatusAggregator(
+                        chatThreadRepository,
+                        taskRepository,
+                        invocationRepository,
+                        new ThreadPlanningQueue(Runnable::run),
+                        null));
+    }
+
+    @Autowired
+    public StartupTaskFailureService(
+            TaskRepository taskRepository,
+            InvocationRepository invocationRepository,
+            ChatThreadRepository chatThreadRepository,
+            ThreadStatusAggregator threadStatusAggregator) {
         this.taskRepository = taskRepository;
         this.invocationRepository = invocationRepository;
         this.chatThreadRepository = chatThreadRepository;
+        this.threadStatusAggregator = threadStatusAggregator;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -83,17 +105,19 @@ public class StartupTaskFailureService {
     private int failThreads(Set<String> affectedTraceIds) {
         Set<String> failedThreadIds = new HashSet<>();
         chatThreadRepository.findAll().stream()
-                .filter(thread -> thread.status() == ChatThreadStatus.RUNNING || affectedTraceIds.contains(thread.traceId()))
-                .forEach(thread -> failThread(thread, failedThreadIds));
+                .filter(thread -> thread.status() == com.agentcrossing.platform.domain.chat.ChatThreadStatus.RUNNING
+                        || affectedTraceIds.contains(thread.traceId()))
+                .forEach(thread -> failThread(thread, affectedTraceIds.contains(thread.traceId()), failedThreadIds));
         return failedThreadIds.size();
     }
 
-    private void failThread(ChatThread thread, Set<String> failedThreadIds) {
-        if (thread.status() == ChatThreadStatus.FAILED) {
-            failedThreadIds.add(thread.threadId());
-            return;
+    private void failThread(ChatThread thread, boolean hasStaleWork, Set<String> failedThreadIds) {
+        if (hasStaleWork) {
+            threadStatusAggregator.refresh(thread.userId(), thread.threadId());
+        } else {
+            // 重启时内存中的规划队列已经丢失；RUNNING 但没有持久化 task/invocation 的线程视为中断规划。
+            threadStatusAggregator.markPlanningFailed(thread.userId(), thread.threadId());
         }
-        chatThreadRepository.updateStatus(thread.threadId(), ChatThreadStatus.FAILED);
         failedThreadIds.add(thread.threadId());
     }
 

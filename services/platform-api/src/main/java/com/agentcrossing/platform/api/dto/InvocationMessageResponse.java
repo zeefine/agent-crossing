@@ -12,6 +12,7 @@ public record InvocationMessageResponse(
         String type,
         String content,
         Object raw,
+        Long sequence,
         String createdAt) {
     public static InvocationMessageResponse from(InvocationMessage message) {
         return new InvocationMessageResponse(
@@ -24,6 +25,7 @@ public record InvocationMessageResponse(
                 message.type().wireValue(),
                 message.content(),
                 message.raw(),
+                message.sequence(),
                 message.createdAt().toString());
     }
 }

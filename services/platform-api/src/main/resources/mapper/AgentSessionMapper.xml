@@ -11,6 +11,7 @@
             <idArg column="agent_id" javaType="java.lang.String"/>
             <idArg column="provider" javaType="java.lang.String"/>
             <arg column="provider_session_id" javaType="java.lang.String"/>
+            <arg column="prompt_version" javaType="java.lang.String"/>
             <arg column="created_at" javaType="java.time.Instant"
                  typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
             <arg column="updated_at" javaType="java.time.Instant"
@@ -31,16 +32,17 @@
     <insert id="upsert" parameterType="com.agentcrossing.platform.domain.session.AgentSession">
         INSERT INTO agent_session (
             user_id, thread_id, trace_id, agent_id, provider,
-            provider_session_id, created_at, updated_at
+            provider_session_id, prompt_version, created_at, updated_at
         ) VALUES (
             #{userId}, #{threadId}, #{traceId}, #{agentId}, #{provider},
-            #{providerSessionId},
+            #{providerSessionId}, #{promptVersion},
             #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
             #{updatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
         )
         ON DUPLICATE KEY UPDATE
             trace_id = VALUES(trace_id),
             provider_session_id = VALUES(provider_session_id),
+            prompt_version = VALUES(prompt_version),
             updated_at = VALUES(updated_at)
     </insert>
 

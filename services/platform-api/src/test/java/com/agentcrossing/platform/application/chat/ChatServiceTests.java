@@ -6,6 +6,7 @@ import com.agentcrossing.platform.TestAgentRegistries;
 import com.agentcrossing.platform.application.parser.ParsedTask;
 import com.agentcrossing.platform.application.parser.QuestParserClient;
 import com.agentcrossing.platform.application.parser.QuestParserService;
+import com.agentcrossing.platform.application.parser.ThreadExecutionSummary;
 import com.agentcrossing.platform.application.routing.LoopGuardService;
 import com.agentcrossing.platform.domain.context.AgentContextCursor;
 import com.agentcrossing.platform.domain.context.InMemoryAgentContextCursorRepository;
@@ -35,6 +36,13 @@ import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.application.invocation.AgentMessageType;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class ChatServiceTests {
@@ -73,6 +81,138 @@ class ChatServiceTests {
     }
 
     @Test
+    void serializesMasterAgentPlanningForSameUserAndThread() throws Exception {
+        InMemoryTaskRepository localTaskRepository = new InMemoryTaskRepository();
+        InMemoryTaskDependencyRepository localDependencyRepository = new InMemoryTaskDependencyRepository();
+        QuestHub localQuestHub = new QuestHub();
+        SerialParserClient serialParserClient = new SerialParserClient();
+        QuestParserService localParserService = new QuestParserService(
+                serialParserClient,
+                TestAgentRegistries.withDefaultAgent(),
+                localTaskRepository,
+                localDependencyRepository,
+                localQuestHub,
+                new LoopGuardService(localTaskRepository));
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        ChatService serialChatService = new ChatService(
+                threadRepository,
+                messageRepository,
+                localParserService,
+                null,
+                null,
+                null,
+                null,
+                null,
+                localTaskRepository,
+                localDependencyRepository,
+                null,
+                null,
+                localQuestHub,
+                executor,
+                (org.springframework.transaction.support.TransactionTemplate) null);
+        ChatThread thread = serialChatService.createThread("user-1", "New chat");
+
+        serialChatService.submitUserMessage("user-1", thread.threadId(), "第一条");
+        assertThat(serialParserClient.firstStarted.await(1, TimeUnit.SECONDS)).isTrue();
+        serialChatService.submitUserMessage("user-1", thread.threadId(), "第二条");
+
+        assertThat(serialParserClient.secondStarted.await(200, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(serialParserClient.maximumActive.get()).isEqualTo(1);
+
+        serialParserClient.releaseFirst.countDown();
+        assertThat(serialParserClient.secondStarted.await(1, TimeUnit.SECONDS)).isTrue();
+        executor.shutdown();
+        assertThat(executor.awaitTermination(2, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(serialParserClient.inputs).containsExactly("第一条", "第二条");
+        assertThat(serialParserClient.maximumActive.get()).isEqualTo(1);
+        assertThat(threadRepository.findByThreadId(thread.threadId()).orElseThrow().status())
+                .isEqualTo(ChatThreadStatus.COMPLETED);
+    }
+
+    @Test
+    void keepsThreadRunningWhenCurrentPlanningCreatesNoTasksButTraceHasOpenTasks() {
+        ChatService taskAwareChatService = taskAwareChatService(parserService, Runnable::run);
+        ChatThread thread = taskAwareChatService.createThread("user-1", "New chat");
+        Instant now = Instant.now();
+        taskRepository.save(new Task(
+                "task-still-running",
+                "user-1",
+                thread.traceId(),
+                null,
+                TaskStatus.PROCESSING,
+                TaskSource.USER,
+                0,
+                "opencode",
+                "continue running",
+                now,
+                now));
+        parserClient.directAnswer = "当前输入不需要新任务。";
+
+        taskAwareChatService.submitUserMessage("user-1", thread.threadId(), "补充说明");
+
+        assertThat(threadRepository.findByThreadId(thread.threadId()).orElseThrow().status())
+                .isEqualTo(ChatThreadStatus.RUNNING);
+    }
+
+    @Test
+    void injectsBoundedTaskStateAndLatestAgentConclusionsIntoMasterAgentPlanning() {
+        ChatService taskAwareChatService = taskAwareChatService(parserService, Runnable::run);
+        ChatThread thread = taskAwareChatService.createThread("user-1", "New chat");
+        Instant now = Instant.now();
+        taskRepository.save(new Task(
+                "task-finished",
+                "user-1",
+                thread.traceId(),
+                null,
+                TaskStatus.COMPLETED,
+                TaskSource.USER,
+                0,
+                "opencode",
+                "分析数据库连接池",
+                now.minusSeconds(2),
+                now.minusSeconds(1)));
+        messageRepository.save(new ChatMessage(
+                "message-agent-conclusion",
+                thread.threadId(),
+                ChatMessageRole.ASSISTANT,
+                "连接池配置是当前性能瓶颈。",
+                ChatMessageStatus.COMPLETED,
+                null,
+                "task-finished",
+                "opencode",
+                now.minusSeconds(1),
+                now.minusSeconds(1)));
+        messageRepository.save(new ChatMessage(
+                "message-agent-old-conclusion",
+                thread.threadId(),
+                ChatMessageRole.ASSISTANT,
+                "这条旧结论不应重复注入。",
+                ChatMessageStatus.COMPLETED,
+                null,
+                "task-finished",
+                "opencode",
+                now.minusSeconds(3),
+                now.minusSeconds(3)));
+        parserClient.directAnswer = "收到。";
+
+        taskAwareChatService.submitUserMessage("user-1", thread.threadId(), "继续优化");
+
+        ThreadExecutionSummary summary = parserClient.capturedThreadExecutionSummary;
+        assertThat(summary).isNotNull();
+        assertThat(summary.taskStatusCounts()).containsEntry("completed", 1);
+        assertThat(summary.recentTasks()).singleElement().satisfies(task -> {
+            assertThat(task.taskId()).isEqualTo("task-finished");
+            assertThat(task.context()).isEqualTo("分析数据库连接池");
+        });
+        assertThat(summary.latestAgentConclusions()).singleElement().satisfies(conclusion -> {
+            assertThat(conclusion.agentId()).isEqualTo("opencode");
+            assertThat(conclusion.taskId()).isEqualTo("task-finished");
+            assertThat(conclusion.content()).isEqualTo("连接池配置是当前性能瓶颈。");
+        });
+    }
+
+    @Test
     void reusesAndStoresMasterAgentProviderSession() {
         InMemoryAgentSessionRepository agentSessionRepository = new InMemoryAgentSessionRepository();
         QuestParserService sessionAwareParserService = new QuestParserService(
@@ -96,14 +236,17 @@ class ChatServiceTests {
                 QuestParserService.MASTER_AGENT_ID,
                 QuestParserService.MASTER_AGENT_PROVIDER,
                 "claude-old",
+                "prompt-v1",
                 now,
                 now));
         parserClient.directAnswer = "继续回答。";
         parserClient.providerSessionId = "claude-new";
+        parserClient.promptVersion = "prompt-v1";
 
         sessionAwareChatService.submitUserMessage("user-1", thread.threadId(), "继续");
 
         assertThat(parserClient.capturedProviderSessionId).isEqualTo("claude-old");
+        assertThat(parserClient.capturedProviderPromptVersion).isEqualTo("prompt-v1");
         assertThat(agentSessionRepository
                         .findByThreadId(
                                 "user-1",
@@ -122,6 +265,15 @@ class ChatServiceTests {
                         .orElseThrow()
                         .threadId())
                 .isEqualTo(thread.threadId());
+        assertThat(agentSessionRepository
+                        .findByThreadId(
+                                "user-1",
+                                thread.threadId(),
+                                QuestParserService.MASTER_AGENT_ID,
+                                QuestParserService.MASTER_AGENT_PROVIDER)
+                        .orElseThrow()
+                        .promptVersion())
+                .isEqualTo("prompt-v1");
     }
 
     @Test
@@ -221,6 +373,7 @@ class ChatServiceTests {
                 "opencode",
                 "opencode",
                 "ses-delete",
+                "prompt-v1",
                 now,
                 now));
         eventLogRepository.save(thread.threadId(), "chatMessage", "payload");
@@ -240,10 +393,32 @@ class ChatServiceTests {
         assertThat(questHub.snapshot()).doesNotContain(queuedTask.taskId(), processingTask.taskId());
     }
 
+    private ChatService taskAwareChatService(QuestParserService service, Executor executor) {
+        return new ChatService(
+                threadRepository,
+                messageRepository,
+                service,
+                null,
+                null,
+                null,
+                null,
+                null,
+                taskRepository,
+                taskDependencyRepository,
+                null,
+                null,
+                questHub,
+                executor,
+                (org.springframework.transaction.support.TransactionTemplate) null);
+    }
+
     private static final class FakeParserClient implements QuestParserClient {
         private String directAnswer;
         private String providerSessionId;
+        private String promptVersion;
         private String capturedProviderSessionId;
+        private String capturedProviderPromptVersion;
+        private ThreadExecutionSummary capturedThreadExecutionSummary;
 
         @Override
         public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
@@ -261,8 +436,90 @@ class ChatServiceTests {
                 List<Agent> availableAgents) {
             capturedProviderSessionId = providerSessionId;
             return new com.agentcrossing.platform.application.parser.UserInputParseResult(
-                    List.of(), directAnswer, this.providerSessionId);
+                    List.of(), directAnswer, this.providerSessionId, this.promptVersion);
         }
 
+        @Override
+        public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
+                String userId,
+                String threadId,
+                String traceId,
+                String input,
+                String providerSessionId,
+                String providerPromptVersion,
+                List<Agent> availableAgents,
+                ThreadExecutionSummary threadExecutionSummary) {
+            capturedProviderSessionId = providerSessionId;
+            capturedProviderPromptVersion = providerPromptVersion;
+            capturedThreadExecutionSummary = threadExecutionSummary;
+            return new com.agentcrossing.platform.application.parser.UserInputParseResult(
+                    List.of(), directAnswer, this.providerSessionId, this.promptVersion);
+        }
+
+        @Override
+        public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
+                String userId,
+                String threadId,
+                String traceId,
+                String input,
+                String providerSessionId,
+                List<Agent> availableAgents,
+                ThreadExecutionSummary threadExecutionSummary) {
+            capturedThreadExecutionSummary = threadExecutionSummary;
+            return parseUserInput(userId, threadId, traceId, input, providerSessionId, availableAgents);
+        }
+
+    }
+
+    private static final class SerialParserClient implements QuestParserClient {
+        private final CountDownLatch firstStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseFirst = new CountDownLatch(1);
+        private final CountDownLatch secondStarted = new CountDownLatch(1);
+        private final AtomicInteger calls = new AtomicInteger();
+        private final AtomicInteger active = new AtomicInteger();
+        private final AtomicInteger maximumActive = new AtomicInteger();
+        private final List<String> inputs = new CopyOnWriteArrayList<>();
+
+        @Override
+        public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
+                String input, List<Agent> availableAgents) {
+            return parse(input);
+        }
+
+        @Override
+        public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
+                String userId,
+                String threadId,
+                String traceId,
+                String input,
+                String providerSessionId,
+                List<Agent> availableAgents) {
+            return parse(input);
+        }
+
+        private com.agentcrossing.platform.application.parser.UserInputParseResult parse(String input) {
+            int call = calls.incrementAndGet();
+            int activeCount = active.incrementAndGet();
+            maximumActive.accumulateAndGet(activeCount, Math::max);
+            inputs.add(input);
+            try {
+                if (call == 1) {
+                    firstStarted.countDown();
+                    if (!releaseFirst.await(1, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("first planning was not released");
+                    }
+                } else {
+                    secondStarted.countDown();
+                }
+                return new com.agentcrossing.platform.application.parser.UserInputParseResult(
+                        List.of(),
+                        "answer-" + call);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("planning interrupted", exception);
+            } finally {
+                active.decrementAndGet();
+            }
+        }
     }
 }

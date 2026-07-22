@@ -87,15 +87,19 @@ class TaskControllerTests {
                         new AppendTaskItemRequest("task-d", "opencode", "追加 D", List.of()),
                         new AppendTaskItemRequest("task-e", "opencode", "追加 E", List.of("task-d")))));
 
-        assertThat(response.data()).extracting(TaskResponse::taskId).containsExactly("task-d", "task-e");
+        assertThat(response.data()).hasSize(2);
+        String taskDId = response.data().getFirst().taskId();
+        String taskEId = response.data().get(1).taskId();
+        assertThat(taskDId).startsWith("agent-task-");
+        assertThat(taskEId).startsWith("agent-task-");
         assertThat(response.data()).allSatisfy(task -> {
             assertThat(task.traceId()).isEqualTo("trace-1");
             assertThat(task.createdByTaskId()).isEqualTo("task-a");
             assertThat(task.source()).isEqualTo("agent");
         });
         assertThat(taskDependencyRepository.findChildTaskIds("task-a"))
-                .containsExactlyInAnyOrder("task-b", "task-d");
-        assertThat(taskDependencyRepository.findChildTaskIds("task-d")).containsExactly("task-e");
+                .containsExactlyInAnyOrder("task-b", taskDId);
+        assertThat(taskDependencyRepository.findChildTaskIds(taskDId)).containsExactly(taskEId);
     }
 
     private static Task task(String taskId, TaskStatus status, Instant createdAt) {

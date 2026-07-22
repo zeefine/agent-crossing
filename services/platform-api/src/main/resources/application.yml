@@ -23,6 +23,14 @@ agent-crossing:
   storage-mode: ${STORAGE_MODE:memory}
   agent-runtime:
     base-url: ${AGENT_RUNTIME_BASE_URL:http://127.0.0.1:8090}
+    http:
+      connect-timeout: ${AGENT_RUNTIME_HTTP_CONNECT_TIMEOUT:3s}
+      connection-request-timeout: ${AGENT_RUNTIME_HTTP_CONNECTION_REQUEST_TIMEOUT:2s}
+      # Python provider default: 100s CLI timeout + up to 50s OpenCode export recovery.
+      business-response-timeout: ${AGENT_RUNTIME_HTTP_BUSINESS_RESPONSE_TIMEOUT:180s}
+      parser-response-timeout: ${AGENT_RUNTIME_HTTP_PARSER_RESPONSE_TIMEOUT:75s}
+      max-connections: ${AGENT_RUNTIME_HTTP_MAX_CONNECTIONS:32}
+      max-connections-per-route: ${AGENT_RUNTIME_HTTP_MAX_CONNECTIONS_PER_ROUTE:16}
   callback-base-url: ${PLATFORM_API_BASE_URL:http://127.0.0.1:8080}/api/callback
   default-agent-id: ${DEFAULT_AGENT_ID:opencode}
   realtime:

@@ -59,19 +59,50 @@ class AvailableAgentCard(ContractModel):
     tools: list[str]
 
 
+class ThreadTaskSummary(ContractModel):
+    task_id: str = Field(alias="taskId")
+    agent_id: str = Field(alias="agentId")
+    status: str
+    context: str
+    updated_at: str = Field(alias="updatedAt")
+
+
+class AgentConclusionSummary(ContractModel):
+    agent_id: str = Field(alias="agentId")
+    task_id: str | None = Field(default=None, alias="taskId")
+    content: str
+    created_at: str = Field(alias="createdAt")
+
+
+class ThreadExecutionSummary(ContractModel):
+    thread_status: str = Field(alias="threadStatus")
+    task_status_counts: dict[str, int] = Field(default_factory=dict, alias="taskStatusCounts")
+    recent_tasks: list[ThreadTaskSummary] = Field(default_factory=list, alias="recentTasks")
+    latest_agent_conclusions: list[AgentConclusionSummary] = Field(
+        default_factory=list,
+        alias="latestAgentConclusions",
+    )
+
+
 class UserInputParseRequest(ContractModel):
     user_id: str | None = Field(default=None, alias="userId")
     thread_id: str | None = Field(default=None, alias="threadId")
     trace_id: str | None = Field(default=None, alias="traceId")
     input: str
     provider_session_id: str | None = Field(default=None, alias="providerSessionId")
+    provider_prompt_version: str | None = Field(default=None, alias="providerPromptVersion")
     available_agents: list[AvailableAgentCard] = Field(alias="availableAgents")
+    thread_execution_summary: ThreadExecutionSummary | None = Field(
+        default=None,
+        alias="threadExecutionSummary",
+    )
 
 
 class UserInputParseResponse(ContractModel):
     tasks: list[ParsedTask]
     direct_answer: str | None = Field(default=None, alias="directAnswer")
     provider_session_id: str | None = Field(default=None, alias="providerSessionId")
+    prompt_version: str | None = Field(default=None, alias="promptVersion")
 
 
 class AgentMessageType(StrEnum):
@@ -112,6 +143,7 @@ class AgentContextPack(ContractModel):
         default_factory=list,
         alias="incrementalChatMessages",
     )
+    available_agents: list[AvailableAgentCard] = Field(default_factory=list, alias="availableAgents")
 
 
 class AgentExecutionRequest(ContractModel):
@@ -130,7 +162,17 @@ class AgentExecutionRequest(ContractModel):
     callback_base_url: str | None = Field(default=None, alias="callbackBaseUrl")
     context_pack: AgentContextPack | None = Field(default=None, alias="contextPack")
     provider_session_id: str | None = Field(default=None, alias="providerSessionId")
+    provider_prompt_version: str | None = Field(default=None, alias="providerPromptVersion")
 
 
 class AgentExecutionResponse(ContractModel):
     messages: list[AgentMessage]
+    final_text: str | None = Field(default=None, alias="finalText")
+    stream_completed: bool = Field(default=False, alias="streamCompleted")
+    last_sequence: int | None = Field(default=None, alias="lastSequence")
+    prompt_version: str | None = Field(default=None, alias="promptVersion")
+
+
+class RuntimeCancelResponse(ContractModel):
+    invocation_id: str = Field(alias="invocationId")
+    accepted: bool

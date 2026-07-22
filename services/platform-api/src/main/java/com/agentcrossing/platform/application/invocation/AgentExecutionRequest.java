@@ -15,5 +15,6 @@ public record AgentExecutionRequest(
         String context,
         String callbackBaseUrl,
         AgentContextPack contextPack,
-        String providerSessionId) {
+        String providerSessionId,
+        String providerPromptVersion) {
 }

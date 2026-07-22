@@ -23,6 +23,11 @@ public class MybatisInvocationMessageRepository implements InvocationMessageRepo
     }
 
     @Override
+    public boolean saveIfAbsent(InvocationMessage message) {
+        return invocationMessageMapper.insertIgnore(message) == 1;
+    }
+
+    @Override
     public List<InvocationMessage> findByInvocationId(String invocationId) {
         return invocationMessageMapper.findByInvocationId(invocationId);
     }

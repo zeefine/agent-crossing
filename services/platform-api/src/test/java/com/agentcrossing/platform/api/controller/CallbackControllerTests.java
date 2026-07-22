@@ -7,6 +7,8 @@ import com.agentcrossing.platform.api.dto.TaskResponse;
 import com.agentcrossing.platform.application.chat.AssistantStreamBuffer;
 import com.agentcrossing.platform.application.chat.ChatEventService;
 import com.agentcrossing.platform.application.realtime.SocketManager;
+import com.agentcrossing.platform.domain.chat.ChatThread;
+import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
 import com.agentcrossing.platform.domain.chat.InMemoryChatThreadRepository;
 import com.agentcrossing.platform.domain.event.InMemoryEventLogRepository;
 import com.agentcrossing.platform.domain.invocation.InMemoryInvocationRepository;
@@ -63,6 +65,51 @@ class CallbackControllerTests {
         assertThat(invocationMessageRepository.findByInvocationId("invocation-1"))
                 .singleElement()
                 .satisfies(message -> assertThat(message.content()).isEqualTo("@opencode continue"));
+    }
+
+    @Test
+    void duplicateCallbackSequenceIsIdempotent() {
+        InMemoryInvocationRepository invocationRepository = new InMemoryInvocationRepository();
+        Invocation invocation = new Invocation(
+                "invocation-1",
+                "anonymous",
+                "task-1",
+                "trace-1",
+                "claudecode",
+                InvocationStatus.RUNNING,
+                Instant.now(),
+                Instant.now(),
+                null);
+        invocationRepository.save(invocation);
+        InMemoryInvocationMessageRepository invocationMessageRepository = new InMemoryInvocationMessageRepository();
+        InMemoryEventLogRepository eventLogRepository = new InMemoryEventLogRepository();
+        InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
+        threadRepository.save(new ChatThread(
+                "thread-1",
+                "anonymous",
+                "thread",
+                ChatThreadStatus.RUNNING,
+                "trace-1",
+                Instant.now(),
+                Instant.now()));
+        InMemoryChatMessageRepository chatMessageRepository = new InMemoryChatMessageRepository();
+        CallbackController controller = new CallbackController(
+                invocationRepository,
+                invocationMessageRepository,
+                threadRepository,
+                new AssistantStreamBuffer(chatMessageRepository),
+                new ChatEventService(new SocketManager(new ObjectMapper(), eventLogRepository), eventLogRepository));
+
+        CallbackMessageRequest callback = new CallbackMessageRequest("invocation-1", "hello", true, 1L);
+        controller.postMessage(callback);
+        controller.postMessage(callback);
+
+        assertThat(invocationMessageRepository.findByInvocationId("invocation-1"))
+                .singleElement()
+                .satisfies(message -> assertThat(message.sequence()).isEqualTo(1L));
+        assertThat(chatMessageRepository.findByThreadId("thread-1"))
+                .singleElement()
+                .satisfies(message -> assertThat(message.content()).isEqualTo("hello"));
     }
 
     private static Task task(String taskId) {

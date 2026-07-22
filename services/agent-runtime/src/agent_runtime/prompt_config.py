@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -20,6 +21,16 @@ class PromptConfig(BaseModel):
             or self.default_business_agent_static_prompt
             or self.business_agent_static_prompt
         )
+
+    def business_agent_prompt_version(self, agent_id: str) -> str:
+        return _prompt_version(self.static_prompt_for_business_agent(agent_id))
+
+    def master_agent_prompt_version(self) -> str:
+        return _prompt_version(self.master_agent_static_prompt)
+
+
+def _prompt_version(prompt: str) -> str:
+    return hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
 
 
 def load_prompt_config() -> PromptConfig:

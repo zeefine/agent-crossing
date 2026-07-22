@@ -1,20 +1,33 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from agent_runtime.api.routes import router
+from agent_runtime.api import routes as api_routes
 from agent_runtime.contracts.models import ApiError, ApiResponse
 from agent_runtime.master_agent.mcp_server import master_agent_mcp
 
 
 def create_app() -> FastAPI:
     mcp_app = master_agent_mcp.http_app(path="/", transport="http", stateless_http=True)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with mcp_app.lifespan(app):
+            try:
+                yield
+            finally:
+                close = getattr(api_routes.runtime_service, "aclose", None)
+                if close is not None:
+                    await close()
+
     app = FastAPI(
         title="Agent Crossing Agent Runtime",
         version="0.1.0",
-        lifespan=mcp_app.lifespan,
+        lifespan=lifespan,
     )
-    app.include_router(router, prefix="/api")
+    app.include_router(api_routes.router, prefix="/api")
     app.mount("/mcp/master-agent", mcp_app)
 
     @app.exception_handler(RequestValidationError)

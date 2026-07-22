@@ -7,6 +7,7 @@ from agent_runtime.contracts.models import (
     AgentExecutionResponse,
     ApiResponse,
     HealthResponse,
+    RuntimeCancelResponse,
     UserInputParseRequest,
     UserInputParseResponse,
 )
@@ -44,3 +45,11 @@ async def parse_user_input(request: UserInputParseRequest) -> UserInputParseResp
 @router.post("/runtime/execute", response_model=AgentExecutionResponse)
 async def execute_agent(request: AgentExecutionRequest) -> AgentExecutionResponse:
     return await runtime_service.execute(request)
+
+
+@router.post("/runtime/invocations/{invocation_id}/cancel", response_model=RuntimeCancelResponse)
+async def cancel_agent_execution(invocation_id: str) -> RuntimeCancelResponse:
+    return RuntimeCancelResponse(
+        invocationId=invocation_id,
+        accepted=await runtime_service.cancel(invocation_id),
+    )

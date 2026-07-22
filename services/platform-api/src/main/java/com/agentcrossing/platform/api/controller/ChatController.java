@@ -3,6 +3,7 @@ package com.agentcrossing.platform.api.controller;
 import com.agentcrossing.platform.api.dto.ApiResponse;
 import com.agentcrossing.platform.api.dto.ChatMessageResponse;
 import com.agentcrossing.platform.api.dto.ChatThreadResponse;
+import com.agentcrossing.platform.api.dto.CancelThreadWorkResponse;
 import com.agentcrossing.platform.api.dto.CreateChatThreadRequest;
 import com.agentcrossing.platform.api.dto.InvocationMessageResponse;
 import com.agentcrossing.platform.api.dto.SubmitChatMessageRequest;
@@ -10,6 +11,7 @@ import com.agentcrossing.platform.api.dto.SubmitChatMessageResponse;
 import com.agentcrossing.platform.application.auth.CurrentUserResolver;
 import com.agentcrossing.platform.application.chat.ChatEventService;
 import com.agentcrossing.platform.application.chat.ChatService;
+import com.agentcrossing.platform.application.chat.ThreadCancellationService;
 import com.agentcrossing.platform.domain.chat.ChatThread;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
 import com.agentcrossing.platform.domain.message.ChatMessageRepository;
@@ -40,6 +42,7 @@ public class ChatController {
     private final ChatEventService chatEventService;
     private final TaskDependencyRepository taskDependencyRepository;
     private final CurrentUserResolver currentUserResolver;
+    private final ThreadCancellationService threadCancellationService;
 
     public ChatController(
             ChatService chatService,
@@ -55,7 +58,8 @@ public class ChatController {
                 invocationMessageRepository,
                 chatEventService,
                 taskDependencyRepository,
-                new CurrentUserResolver());
+                new CurrentUserResolver(),
+                null);
     }
 
     @Autowired
@@ -66,7 +70,8 @@ public class ChatController {
             InvocationMessageRepository invocationMessageRepository,
             ChatEventService chatEventService,
             TaskDependencyRepository taskDependencyRepository,
-            CurrentUserResolver currentUserResolver) {
+            CurrentUserResolver currentUserResolver,
+            ThreadCancellationService threadCancellationService) {
         this.chatService = chatService;
         this.chatThreadRepository = chatThreadRepository;
         this.chatMessageRepository = chatMessageRepository;
@@ -74,6 +79,7 @@ public class ChatController {
         this.chatEventService = chatEventService;
         this.taskDependencyRepository = taskDependencyRepository;
         this.currentUserResolver = currentUserResolver;
+        this.threadCancellationService = threadCancellationService;
     }
 
     @PostMapping("/threads")
@@ -114,6 +120,17 @@ public class ChatController {
             @Valid @RequestBody SubmitChatMessageRequest request) {
         return ApiResponse.ok(SubmitChatMessageResponse.from(
                 chatService.submitUserMessage(currentUser(userId), threadId, request.content()), taskDependencyRepository));
+    }
+
+    @PostMapping("/threads/{threadId}/cancel")
+    public ApiResponse<CancelThreadWorkResponse> cancelThreadWork(
+            @RequestHeader(value = CurrentUserResolver.USER_ID_HEADER, required = false) String userId,
+            @PathVariable String threadId) {
+        if (threadCancellationService == null) {
+            throw new IllegalStateException("Thread cancellation is not configured");
+        }
+        return ApiResponse.ok(CancelThreadWorkResponse.from(
+                threadCancellationService.cancel(currentUser(userId), threadId)));
     }
 
     @GetMapping("/threads/{threadId}/messages")

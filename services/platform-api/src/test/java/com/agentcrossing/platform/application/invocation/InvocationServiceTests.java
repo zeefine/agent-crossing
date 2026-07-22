@@ -2,12 +2,7 @@ package com.agentcrossing.platform.application.invocation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.agentcrossing.platform.TestAgentRegistries;
-import com.agentcrossing.platform.application.parser.ParsedTask;
-import com.agentcrossing.platform.application.parser.QuestParserClient;
-import com.agentcrossing.platform.application.parser.QuestParserService;
-import com.agentcrossing.platform.application.routing.LoopGuardService;
-import com.agentcrossing.platform.domain.agent.Agent;
+import com.agentcrossing.platform.application.chat.AssistantStreamBuffer;
 import com.agentcrossing.platform.domain.chat.ChatThread;
 import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
 import com.agentcrossing.platform.domain.chat.InMemoryChatThreadRepository;
@@ -21,7 +16,6 @@ import com.agentcrossing.platform.domain.message.ChatMessageStatus;
 import com.agentcrossing.platform.domain.message.InMemoryChatMessageRepository;
 import com.agentcrossing.platform.domain.message.InMemoryInvocationMessageRepository;
 import com.agentcrossing.platform.domain.message.InvocationMessage;
-import com.agentcrossing.platform.domain.queue.QuestHub;
 import com.agentcrossing.platform.domain.session.AgentSession;
 import com.agentcrossing.platform.domain.session.InMemoryAgentSessionRepository;
 import com.agentcrossing.platform.domain.task.InMemoryTaskDependencyRepository;
@@ -31,19 +25,17 @@ import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.domain.task.TaskSource;
 import com.agentcrossing.platform.domain.task.TaskStatus;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
 class InvocationServiceTests {
     private final InMemoryInvocationRepository invocationRepository = new InMemoryInvocationRepository();
     private final InMemoryTaskRepository taskRepository = new InMemoryTaskRepository();
     private final InMemoryTaskDependencyRepository taskDependencyRepository = new InMemoryTaskDependencyRepository();
-    private final QuestHub questHub = new QuestHub();
     private final FakeRuntimeClient runtimeClient = new FakeRuntimeClient();
-    private final FakeParserClient parserClient = new FakeParserClient();
-    private final InvocationService service = invocationService(runtimeClient, parserService(parserClient));
+    private final InvocationService service = invocationService(runtimeClient);
 
     @Test
     void createsInvocationRunsRuntimeAndDoesNotParseNaturalLanguageOutput() {
@@ -64,7 +56,6 @@ class InvocationServiceTests {
         assertThat(invocation.status()).isEqualTo(InvocationStatus.SUCCEEDED);
         assertThat(invocation.taskId()).isEqualTo(task.taskId());
         assertThat(taskRepository.findByTaskId(task.taskId()).orElseThrow().status()).isEqualTo(TaskStatus.COMPLETED);
-        assertThat(questHub.snapshot()).isEmpty();
         assertThat(runtimeClient.lastRequest.invocationId()).isEqualTo(invocation.invocationId());
     }
 
@@ -77,12 +68,36 @@ class InvocationServiceTests {
         taskDependencyRepository.saveAll(List.of(new TaskDependency("task-a", "task-b")));
         runtimeClient.failure = new RuntimeException("runtime failed");
 
-        InvocationService dependencyAwareService = invocationService(runtimeClient, parserService(parserClient));
+        InvocationService dependencyAwareService = invocationService(runtimeClient);
         Invocation invocation = dependencyAwareService.execute(head);
 
         assertThat(invocation.status()).isEqualTo(InvocationStatus.FAILED);
         assertThat(taskRepository.findByTaskId("task-a").orElseThrow().status()).isEqualTo(TaskStatus.FAILED);
         assertThat(taskRepository.findByTaskId("task-b").orElseThrow().status()).isEqualTo(TaskStatus.BLOCKED);
+    }
+
+    @Test
+    void keepsCancellationWhenRuntimeReturnsAfterUserStoppedTask() {
+        Task task = task("task-canceled");
+        taskRepository.save(task);
+        runtimeClient.result = new AgentExecutionResult(List.of(new AgentMessage(
+                "ignored",
+                task.taskId(),
+                task.traceId(),
+                task.agentId(),
+                AgentMessageType.MESSAGE,
+                "late answer",
+                null,
+                Instant.now())));
+        runtimeClient.onExecute = request -> {
+            invocationRepository.updateStatus(request.invocationId(), InvocationStatus.CANCELED);
+            taskRepository.updateStatus(request.taskId(), TaskStatus.CANCELED);
+        };
+
+        Invocation invocation = service.execute(task);
+
+        assertThat(invocation.status()).isEqualTo(InvocationStatus.CANCELED);
+        assertThat(taskRepository.findByTaskId(task.taskId()).orElseThrow().status()).isEqualTo(TaskStatus.CANCELED);
     }
 
     @Test
@@ -101,7 +116,6 @@ class InvocationServiceTests {
                 now));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 invocationMessageRepository,
                 threadRepository,
                 messageRepository,
@@ -149,7 +163,6 @@ class InvocationServiceTests {
                 now));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 invocationMessageRepository,
                 threadRepository,
                 messageRepository,
@@ -180,7 +193,7 @@ class InvocationServiceTests {
     }
 
     @Test
-    void doesNotAppendReturnedMessagesAgainWhenCallbackAlreadyStreamedAssistantMessage() {
+    void reconcilesPartialCallbackContentWithAuthoritativeFinalText() {
         InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
         InMemoryChatMessageRepository messageRepository = new InMemoryChatMessageRepository();
         InMemoryInvocationMessageRepository invocationMessageRepository = new InMemoryInvocationMessageRepository();
@@ -195,6 +208,7 @@ class InvocationServiceTests {
                 now));
         Task task = task("task-streamed");
         taskRepository.save(task);
+        AssistantStreamBuffer streamBuffer = new AssistantStreamBuffer(messageRepository);
         AgentRuntimeClient callbackThenReturnSameMessage = request -> {
             invocationMessageRepository.save(new InvocationMessage(
                     "invocation-message-streamed",
@@ -204,36 +218,50 @@ class InvocationServiceTests {
                     request.traceId(),
                     request.agentId(),
                     AgentMessageType.MESSAGE,
-                    "claude streamed once",
+                    "claude streamed",
                     null,
                     now));
-            messageRepository.save(new ChatMessage(
-                    "message-streamed",
-                    "thread-1",
-                    ChatMessageRole.ASSISTANT,
-                    "claude streamed once",
-                    ChatMessageStatus.STREAMING,
+            Invocation callbackInvocation = new Invocation(
                     request.invocationId(),
-                    request.taskId(),
-                    request.agentId(),
-                    now,
-                    now));
-            return new AgentExecutionResult(List.of(new AgentMessage(
-                    "returned",
+                    request.userId(),
                     request.taskId(),
                     request.traceId(),
                     request.agentId(),
-                    AgentMessageType.MESSAGE,
+                    InvocationStatus.RUNNING,
+                    now,
+                    now,
+                    null);
+            streamBuffer.appendChunk(callbackInvocation, "thread-1", "claude ");
+            // 第二个分片不足 1KB，会留在内存 buffer 中，专门覆盖终态校准与 drain 的顺序。
+            streamBuffer.appendChunk(callbackInvocation, "thread-1", "streamed");
+            return new AgentExecutionResult(
+                    List.of(new AgentMessage(
+                            "returned",
+                            request.taskId(),
+                            request.traceId(),
+                            request.agentId(),
+                            AgentMessageType.MESSAGE,
+                            "claude streamed once",
+                            null,
+                            now)),
                     "claude streamed once",
-                    null,
-                    now)));
+                    true,
+                    2L);
         };
-        InvocationService localService = invocationService(
+        InvocationService localService = new InvocationService(
+                invocationRepository,
+                taskRepository,
                 callbackThenReturnSameMessage,
-                parserService(parserClient),
+                "http://127.0.0.1:8080/api/callback",
+                com.agentcrossing.platform.application.routing.TaskDispatchSignal.NOOP,
                 invocationMessageRepository,
                 threadRepository,
                 messageRepository,
+                null,
+                null,
+                streamBuffer,
+                taskDependencyRepository,
+                null,
                 null);
 
         Invocation invocation = localService.execute(task);
@@ -247,7 +275,7 @@ class InvocationServiceTests {
                 });
         assertThat(invocationMessageRepository.findByInvocationId(invocation.invocationId()))
                 .extracting(InvocationMessage::content)
-                .containsExactly("claude streamed once");
+                .containsExactly("claude streamed");
     }
 
     @Test
@@ -264,7 +292,6 @@ class InvocationServiceTests {
                 now));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 null,
                 threadRepository,
                 null,
@@ -319,7 +346,6 @@ class InvocationServiceTests {
         messageRepository.save(chatMessage("message-3", "assistant", "opencode", "task-own", base.plusSeconds(3)));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 null,
                 threadRepository,
                 messageRepository,
@@ -360,7 +386,6 @@ class InvocationServiceTests {
         messageRepository.save(chatMessage("message-1", "user", null, null, base.plusSeconds(1)));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 null,
                 threadRepository,
                 messageRepository,
@@ -395,6 +420,7 @@ class InvocationServiceTests {
                 "opencode",
                 "opencode",
                 "ses-existing",
+                "prompt-v1",
                 now,
                 now));
         threadRepository.save(new ChatThread(
@@ -407,7 +433,6 @@ class InvocationServiceTests {
                 now));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 null,
                 threadRepository,
                 null,
@@ -422,18 +447,22 @@ class InvocationServiceTests {
                 task.agentId(),
                 AgentMessageType.DONE,
                 null,
-                Map.of("providerSessionId", "ses-updated"),
+                Map.of("providerSessionId", "ses-updated", "promptVersion", "prompt-v1"),
                 Instant.now())));
 
         localService.execute(task);
 
         assertThat(runtimeClient.lastRequest.providerSessionId()).isEqualTo("ses-existing");
+        assertThat(runtimeClient.lastRequest.providerPromptVersion()).isEqualTo("prompt-v1");
         assertThat(agentSessionRepository.findByThreadId("anonymous", "thread-1", "opencode", "opencode"))
                 .map(AgentSession::providerSessionId)
                 .contains("ses-updated");
         assertThat(agentSessionRepository.findByThreadId("anonymous", "thread-1", "opencode", "opencode"))
                 .map(AgentSession::threadId)
                 .contains("thread-1");
+        assertThat(agentSessionRepository.findByThreadId("anonymous", "thread-1", "opencode", "opencode"))
+                .map(AgentSession::promptVersion)
+                .contains("prompt-v1");
     }
 
     @Test
@@ -448,6 +477,7 @@ class InvocationServiceTests {
                 "opencode",
                 "opencode",
                 "ses-thread-existing",
+                "prompt-v1",
                 now,
                 now));
         threadRepository.save(new ChatThread(
@@ -460,7 +490,6 @@ class InvocationServiceTests {
                 now));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 null,
                 threadRepository,
                 null,
@@ -475,7 +504,7 @@ class InvocationServiceTests {
                 task.agentId(),
                 AgentMessageType.DONE,
                 null,
-                Map.of("providerSessionId", "ses-thread-updated"),
+                Map.of("providerSessionId", "ses-thread-updated", "promptVersion", "prompt-v1"),
                 Instant.now())));
 
         localService.execute(task);
@@ -501,6 +530,7 @@ class InvocationServiceTests {
                 "opencode",
                 "opencode",
                 "ses-old-thread",
+                "prompt-v1",
                 now,
                 now));
         threadRepository.save(new ChatThread(
@@ -513,7 +543,6 @@ class InvocationServiceTests {
                 now));
         InvocationService localService = invocationService(
                 runtimeClient,
-                parserService(parserClient),
                 null,
                 threadRepository,
                 null,
@@ -528,7 +557,7 @@ class InvocationServiceTests {
                 task.agentId(),
                 AgentMessageType.DONE,
                 null,
-                Map.of("providerSessionId", "ses-created-for-thread"),
+                Map.of("providerSessionId", "ses-created-for-thread", "promptVersion", "prompt-v1"),
                 Instant.now())));
 
         localService.execute(task);
@@ -574,30 +603,18 @@ class InvocationServiceTests {
                 createdAt);
     }
 
-    private QuestParserService parserService(QuestParserClient parserClient) {
-        return new QuestParserService(
-                parserClient,
-                TestAgentRegistries.withDefaultAgent(),
-                taskRepository,
-                taskDependencyRepository,
-                questHub,
-                new LoopGuardService(taskRepository));
-    }
-
-    private InvocationService invocationService(AgentRuntimeClient runtimeClient, QuestParserService parserService) {
-        return invocationService(runtimeClient, parserService, null, null, null, null);
+    private InvocationService invocationService(AgentRuntimeClient runtimeClient) {
+        return invocationService(runtimeClient, null, null, null, null);
     }
 
     private InvocationService invocationService(
             AgentRuntimeClient runtimeClient,
-            QuestParserService parserService,
             InMemoryInvocationMessageRepository invocationMessageRepository,
             InMemoryChatThreadRepository threadRepository,
             InMemoryChatMessageRepository messageRepository,
             AgentContextService agentContextService) {
         return invocationService(
                 runtimeClient,
-                parserService,
                 invocationMessageRepository,
                 threadRepository,
                 messageRepository,
@@ -607,7 +624,6 @@ class InvocationServiceTests {
 
     private InvocationService invocationService(
             AgentRuntimeClient runtimeClient,
-            QuestParserService parserService,
             InMemoryInvocationMessageRepository invocationMessageRepository,
             InMemoryChatThreadRepository threadRepository,
             InMemoryChatMessageRepository messageRepository,
@@ -617,7 +633,6 @@ class InvocationServiceTests {
                 invocationRepository,
                 taskRepository,
                 runtimeClient,
-                parserService,
                 "http://127.0.0.1:8080/api/callback",
                 com.agentcrossing.platform.application.routing.TaskDispatchSignal.NOOP,
                 invocationMessageRepository,
@@ -635,10 +650,14 @@ class InvocationServiceTests {
         private AgentExecutionRequest lastRequest;
         private AgentExecutionResult result = new AgentExecutionResult(List.of());
         private RuntimeException failure;
+        private Consumer<AgentExecutionRequest> onExecute;
 
         @Override
         public AgentExecutionResult execute(AgentExecutionRequest request) {
             lastRequest = request;
+            if (onExecute != null) {
+                onExecute.accept(request);
+            }
             if (failure != null) {
                 throw failure;
             }
@@ -646,11 +665,4 @@ class InvocationServiceTests {
         }
     }
 
-    private static final class FakeParserClient implements QuestParserClient {
-        @Override
-        public com.agentcrossing.platform.application.parser.UserInputParseResult parseUserInput(
-                String input, List<Agent> availableAgents) {
-            return new com.agentcrossing.platform.application.parser.UserInputParseResult(List.of(), null);
-        }
-    }
 }

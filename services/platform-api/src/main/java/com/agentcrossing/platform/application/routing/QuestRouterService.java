@@ -56,6 +56,18 @@ public class QuestRouterService {
 
         Task task = acquisition.dispatchTask().get();
         taskEventService.publish(task);
+        if (!parallelTaskWorker.submit(task)) {
+            Task requeuedTask = requeueRejectedDispatch(task);
+            taskEventService.publish(requeuedTask);
+            log.warn(
+                    "agent_crossing_perf event=worker_rejected userId={} taskId={} traceId={} agentId={}",
+                    task.userId(),
+                    task.taskId(),
+                    task.traceId(),
+                    task.agentId());
+            // 停止当前 drain，等待已有 worker 完成后的调度信号再重试，避免队列满时空转。
+            return Optional.empty();
+        }
         log.info(
                 "agent_crossing_perf event=router_dispatch durationMs={} routerWaitMs={} userId={} taskId={} traceId={} agentId={} blockedTasks={}",
                 elapsedMs(startedAt),
@@ -65,7 +77,6 @@ public class QuestRouterService {
                 task.traceId(),
                 task.agentId(),
                 acquisition.blockedTasks().size());
-        parallelTaskWorker.submit(task);
         return Optional.of(task);
     }
 
@@ -102,6 +113,14 @@ public class QuestRouterService {
                 }
             } while (changed);
             return new Acquisition(Optional.empty(), blockedTasks);
+        }
+    }
+
+    private Task requeueRejectedDispatch(Task task) {
+        synchronized (routingLock) {
+            Task requeued = taskRepository.updateStatus(task.taskId(), TaskStatus.QUEUED);
+            questHub.enqueueLast(task.taskId());
+            return requeued;
         }
     }
 

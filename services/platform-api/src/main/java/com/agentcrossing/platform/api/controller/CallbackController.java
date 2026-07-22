@@ -10,6 +10,7 @@ import com.agentcrossing.platform.application.realtime.RealtimeEventTypes;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
+import com.agentcrossing.platform.domain.invocation.InvocationStatus;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.InvocationMessage;
 import com.agentcrossing.platform.domain.message.InvocationMessageRepository;
@@ -57,7 +58,11 @@ public class CallbackController {
         long startedAt = System.nanoTime();
         Invocation invocation = invocationRepository.findByInvocationId(request.invocationId())
                 .orElseThrow(() -> new IllegalArgumentException("Invocation not found: " + request.invocationId()));
-        saveAndPublishMessage(invocation, request.content());
+        if (invocation.status() == InvocationStatus.CANCELED) {
+            // 停止已落库后，CLI 可能仍在收尾并回写尾分片；这些内容不能复活已取消的任务。
+            return ApiResponse.ok(List.of());
+        }
+        saveAndPublishMessage(invocation, request);
         log.info(
                 "agent_crossing_perf event=callback_message durationMs={} invocationId={} taskId={} traceId={} agentId={} contentChars={}",
                 elapsedMs(startedAt),
@@ -69,9 +74,11 @@ public class CallbackController {
         return ApiResponse.ok(List.of());
     }
 
-    private void saveAndPublishMessage(Invocation invocation, String content) {
+    private void saveAndPublishMessage(Invocation invocation, CallbackMessageRequest request) {
+        String content = request.content();
+        Long sequence = request.sequence();
         // invocation_message 仍然每分片 INSERT 一行——这是 Developer log 的"原始事件流"粒度，调试时要看。
-        InvocationMessage invocationMessage = invocationMessageRepository.save(new InvocationMessage(
+        InvocationMessage invocationMessage = new InvocationMessage(
                 "invocation-message-" + UUID.randomUUID(),
                 invocation.userId(),
                 invocation.invocationId(),
@@ -81,7 +88,11 @@ public class CallbackController {
                 AgentMessageType.MESSAGE,
                 content,
                 null,
-                Instant.now()));
+                sequence,
+                Instant.now());
+        if (!invocationMessageRepository.saveIfAbsent(invocationMessage)) {
+            return;
+        }
         chatThreadRepository.findByTraceId(invocation.traceId()).ifPresent(thread -> {
             // chat_message 走 AssistantStreamBuffer：累积到 1KB UTF-8 才 UPDATE 一次。
             // 返回的 ChatMessage 总是含最新累积内容，方便直接 publish 给 WS 显示。

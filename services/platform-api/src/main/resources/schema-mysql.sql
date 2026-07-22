@@ -83,6 +83,22 @@ CREATE TABLE IF NOT EXISTS task (
     KEY idx_task_created_by (created_by_task_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Agent create_tasks idempotency. client_task_id is scoped to source_task_id so an MCP retry
+-- returns the original platform task instead of allocating a second random-suffixed task.
+CREATE TABLE IF NOT EXISTS task_creation (
+    source_task_id VARCHAR(128) NOT NULL,
+    client_task_id VARCHAR(128) NOT NULL,
+    task_id VARCHAR(128) NOT NULL,
+    user_id VARCHAR(128) NOT NULL,
+    trace_id VARCHAR(128) NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    created_at TIMESTAMP(3) NOT NULL,
+    PRIMARY KEY (source_task_id, client_task_id),
+    UNIQUE KEY uk_task_creation_task (task_id),
+    KEY idx_task_creation_user_trace (user_id, trace_id),
+    KEY idx_task_creation_idempotency (source_task_id, idempotency_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 SET @ac_task_has_user_id := (
     SELECT COUNT(1) FROM information_schema.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'task' AND COLUMN_NAME = 'user_id'
@@ -295,12 +311,47 @@ CREATE TABLE IF NOT EXISTS agent_session (
     agent_id VARCHAR(128) NOT NULL,
     provider VARCHAR(64) NOT NULL,
     provider_session_id VARCHAR(255) NOT NULL,
+    prompt_version VARCHAR(64) NOT NULL,
     created_at TIMESTAMP(3) NOT NULL,
     updated_at TIMESTAMP(3) NOT NULL,
     PRIMARY KEY (user_id, thread_id, agent_id, provider),
     KEY idx_agent_session_trace (trace_id, agent_id, provider),
     KEY idx_agent_session_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @ac_agent_session_has_prompt_version := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session'
+      AND COLUMN_NAME = 'prompt_version'
+);
+SET @ac_agent_session_add_prompt_version_sql := IF(
+    @ac_agent_session_has_prompt_version = 0,
+    'ALTER TABLE agent_session ADD COLUMN prompt_version VARCHAR(64) NULL AFTER provider_session_id',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_add_prompt_version_stmt FROM @ac_agent_session_add_prompt_version_sql;
+EXECUTE ac_agent_session_add_prompt_version_stmt;
+DEALLOCATE PREPARE ac_agent_session_add_prompt_version_stmt;
+
+UPDATE agent_session
+SET prompt_version = 'legacy'
+WHERE prompt_version IS NULL OR prompt_version = '';
+
+SET @ac_agent_session_prompt_version_nullable := (
+    SELECT IS_NULLABLE FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session'
+      AND COLUMN_NAME = 'prompt_version'
+);
+SET @ac_agent_session_prompt_version_not_null_sql := IF(
+    @ac_agent_session_prompt_version_nullable = 'YES',
+    'ALTER TABLE agent_session MODIFY COLUMN prompt_version VARCHAR(64) NOT NULL',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_prompt_version_not_null_stmt FROM @ac_agent_session_prompt_version_not_null_sql;
+EXECUTE ac_agent_session_prompt_version_not_null_stmt;
+DEALLOCATE PREPARE ac_agent_session_prompt_version_not_null_stmt;
 
 SET @ac_agent_session_has_thread_id := (
     SELECT COUNT(1) FROM information_schema.COLUMNS
@@ -397,13 +448,45 @@ CREATE TABLE IF NOT EXISTS invocation_message (
     type VARCHAR(32) NOT NULL,
     content MEDIUMTEXT NULL,
     raw_payload JSON NULL,
+    sequence_no BIGINT NULL,
     created_at TIMESTAMP(3) NOT NULL,
     PRIMARY KEY (message_id),
     KEY idx_invocation_message_user_trace_created (user_id, trace_id, created_at, message_id),
     KEY idx_invocation_message_invocation_created (invocation_id, created_at, message_id),
+    UNIQUE KEY uk_invocation_message_invocation_sequence (invocation_id, sequence_no),
     KEY idx_invocation_message_trace_created (trace_id, created_at, message_id),
     KEY idx_invocation_message_task_created (task_id, created_at, message_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @ac_invocation_message_has_sequence_no := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'invocation_message'
+      AND COLUMN_NAME = 'sequence_no'
+);
+SET @ac_invocation_message_add_sequence_no_sql := IF(
+    @ac_invocation_message_has_sequence_no = 0,
+    'ALTER TABLE invocation_message ADD COLUMN sequence_no BIGINT NULL AFTER raw_payload',
+    'SELECT 1'
+);
+PREPARE ac_invocation_message_add_sequence_no_stmt FROM @ac_invocation_message_add_sequence_no_sql;
+EXECUTE ac_invocation_message_add_sequence_no_stmt;
+DEALLOCATE PREPARE ac_invocation_message_add_sequence_no_stmt;
+
+SET @ac_invocation_message_has_sequence_uk := (
+    SELECT COUNT(1) FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'invocation_message'
+      AND INDEX_NAME = 'uk_invocation_message_invocation_sequence'
+);
+SET @ac_invocation_message_add_sequence_uk_sql := IF(
+    @ac_invocation_message_has_sequence_uk = 0,
+    'ALTER TABLE invocation_message ADD UNIQUE INDEX uk_invocation_message_invocation_sequence (invocation_id, sequence_no)',
+    'SELECT 1'
+);
+PREPARE ac_invocation_message_add_sequence_uk_stmt FROM @ac_invocation_message_add_sequence_uk_sql;
+EXECUTE ac_invocation_message_add_sequence_uk_stmt;
+DEALLOCATE PREPARE ac_invocation_message_add_sequence_uk_stmt;
 
 SET @ac_invocation_message_has_user_id := (
     SELECT COUNT(1) FROM information_schema.COLUMNS

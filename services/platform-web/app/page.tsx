@@ -13,6 +13,7 @@ import {
   Loader2,
   Plus,
   Send,
+  Square,
   Sparkles,
   Trash2,
   UserRound,
@@ -32,6 +33,7 @@ import type { Edge, Node, NodeProps } from "@xyflow/react";
 import dagre from "dagre";
 import {
   AgentStatus,
+  cancelThreadWork,
   ChatEvent,
   ChatMessage,
   ChatThread,
@@ -63,6 +65,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loadState, setLoadState] = useState<LoadState>("booting");
   const [isSending, setIsSending] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDagCollapsed, setIsDagCollapsed] = useState(false);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -100,6 +103,7 @@ export default function Home() {
   const activeTraceIdRef = useRef<string | null>(null);
   const activeThreadIdRef = useRef<string | null>(null);
   const inflightThreadIdRef = useRef<string | null>(null);
+  const canceledThreadIdRef = useRef<string | null>(null);
 
   const isThreadStillActive = useCallback((threadId: string) => activeThreadIdRef.current === threadId, []);
 
@@ -285,7 +289,7 @@ export default function Home() {
     shouldStickMessagesToBottomRef.current = true;
     try {
       const result = await sendMessage(threadId, content);
-      if (!isThreadStillActive(threadId)) {
+      if (!isThreadStillActive(threadId) || canceledThreadIdRef.current === threadId) {
         return;
       }
       setThreads((current) => upsertHeadBy(current, result.thread, "threadId"));
@@ -299,6 +303,38 @@ export default function Home() {
       setIsSending(false);
     }
   }
+
+  async function handleCancel() {
+    if (!activeThreadId || isStopping) {
+      return;
+    }
+    const threadId = activeThreadId;
+    canceledThreadIdRef.current = threadId;
+    setIsStopping(true);
+    try {
+      const result = await cancelThreadWork(threadId);
+      if (isThreadStillActive(threadId)) {
+        setTasks((current) => current.map((task) => (
+          result.canceledTaskIds.includes(task.taskId)
+            ? { ...task, status: "canceled" }
+            : task
+        )));
+      }
+      await Promise.allSettled([refreshThreads(), refetchTasks(), refreshAgents()]);
+    } catch (error) {
+      canceledThreadIdRef.current = null;
+      window.alert(`停止任务失败：${error instanceof Error ? error.message : "未知错误"}`);
+    } finally {
+      setIsStopping(false);
+    }
+  }
+
+  // isSending 只是消息 POST 尚未确认，不能发取消请求，否则取消可能先于提交到达后端。
+  // 只有平台已确认 thread/task 活跃后，停止按钮才会出现。
+  const canCancelActiveWork = Boolean(activeThreadId) && (
+    activeThread?.status === "running"
+    || tasks.some((task) => task.status === "queued" || task.status === "processing")
+  );
 
   if (loadState === "booting") {
     return <BootScreen label="Connecting platform" />;
@@ -423,8 +459,17 @@ export default function Home() {
                 placeholder="@opencode 规划并执行下一步"
                 rows={1}
               />
-              <button className="send-button" type="submit" disabled={!input.trim() || isSending}>
-                {isSending ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+              <button
+                className={`send-button ${canCancelActiveWork ? "stop-button" : ""}`}
+                type={canCancelActiveWork ? "button" : "submit"}
+                onClick={canCancelActiveWork ? () => void handleCancel() : undefined}
+                disabled={canCancelActiveWork ? isStopping : !input.trim() || isSending}
+                aria-label={canCancelActiveWork ? "停止当前任务" : "发送消息"}
+                title={canCancelActiveWork ? "停止当前任务" : "发送消息"}
+              >
+                {canCancelActiveWork
+                  ? (isStopping ? <Loader2 className="spin" size={18} /> : <Square size={15} fill="currentColor" />)
+                  : (isSending ? <Loader2 className="spin" size={18} /> : <Send size={18} />)}
               </button>
             </div>
           </form>

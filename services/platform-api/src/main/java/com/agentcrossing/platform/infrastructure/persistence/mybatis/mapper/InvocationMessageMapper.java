@@ -9,6 +9,8 @@ import org.apache.ibatis.annotations.Param;
 public interface InvocationMessageMapper {
     void upsert(InvocationMessage message);
 
+    int insertIgnore(InvocationMessage message);
+
     List<InvocationMessage> findByInvocationId(@Param("invocationId") String invocationId);
 
     List<InvocationMessage> findByTraceId(@Param("traceId") String traceId);

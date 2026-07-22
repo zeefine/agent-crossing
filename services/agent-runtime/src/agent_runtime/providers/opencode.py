@@ -11,14 +11,69 @@ import time
 from typing import Any
 
 from agent_runtime.config import settings
-from agent_runtime.callback.client import CallbackClient
+from agent_runtime.callback.dispatcher import (
+    CallbackDeliverySummary,
+    CallbackDispatcher,
+    InvocationCallbackStream,
+)
+from agent_runtime.business_prompt import business_prompt_composer
 from agent_runtime.contracts.models import AgentExecutionRequest, AgentMessage, AgentMessageType
 from agent_runtime.prompt_config import load_prompt_config
+from agent_runtime.prompt_session import annotate_prompt_version, prepare_execution_request
 from agent_runtime.providers.base import BaseProvider
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 
 
 logger = logging.getLogger(__name__)
+
+
+class _IncrementalTextReconciler:
+    """把终端重复绘制/累计快照归一化为只包含新增正文的分片。"""
+
+    def __init__(self) -> None:
+        self._last_observed_text = ""
+        self._emitted_text = ""
+
+    def reconcile(self, message: AgentMessage) -> AgentMessage | None:
+        if (
+            message.type not in (AgentMessageType.TEXT_DELTA, AgentMessageType.MESSAGE)
+            or OpenCodeProvider._is_tool_use_message(message)
+            or not message.content
+        ):
+            return message
+
+        content = message.content
+        if content == self._last_observed_text or content == self._emitted_text:
+            self._last_observed_text = content
+            return None
+
+        if self._last_observed_text and content.startswith(self._last_observed_text):
+            delta = content[len(self._last_observed_text) :]
+        elif self._emitted_text and content.startswith(self._emitted_text):
+            delta = content[len(self._emitted_text) :]
+        else:
+            delta = content
+
+        self._last_observed_text = content
+        if not delta:
+            return None
+        self._emitted_text += delta
+        if delta == content:
+            return message
+        raw = dict(message.raw) if isinstance(message.raw, dict) else {}
+        raw["streamNormalization"] = "cumulative_snapshot_suffix"
+        return message.model_copy(update={"content": delta, "raw": raw})
+
+
+async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:
+    if process is None or process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
 
 
 class OpenCodeProvider(BaseProvider):
@@ -41,16 +96,30 @@ class OpenCodeProvider(BaseProvider):
         command: str | None = None,
         timeout_seconds: float | None = None,
         normalizer: AgentMessageNormalizer | None = None,
+        callback_dispatcher: CallbackDispatcher | None = None,
     ) -> None:
         self._command = command or settings.opencode_command
         self._timeout_seconds = timeout_seconds or settings.provider_timeout_seconds
         self._normalizer = normalizer or AgentMessageNormalizer()
+        self._callback_dispatcher = callback_dispatcher or CallbackDispatcher()
+        self._callback_streams: dict[str, InvocationCallbackStream] = {}
 
     @property
     def agent_id(self) -> str:
         return "opencode"
 
     async def execute(self, request: AgentExecutionRequest) -> list[AgentMessage]:
+        prompt_config = load_prompt_config()
+        prompt_version = prompt_config.business_agent_prompt_version(request.agent_id)
+        original_session_id = request.provider_session_id
+        request = prepare_execution_request(request, prompt_version)
+        if original_session_id and not request.provider_session_id:
+            logger.info(
+                "Rotating OpenCode session because the static prompt version changed: invocationId=%s taskId=%s agentId=%s",
+                request.invocation_id,
+                request.task_id,
+                request.agent_id,
+            )
         command = self._build_command(request)
         if not command:
             return [
@@ -78,6 +147,10 @@ class OpenCodeProvider(BaseProvider):
             previous_user_marker = await self._latest_user_marker_from_session_export(request.provider_session_id)
         min_message_created_at_ms = int(time.time() * 1000) - 1000 if request.provider_session_id else None
 
+        callback_stream = self._callback_dispatcher.open_stream(request)
+        if callback_stream is not None:
+            self._callback_streams[request.invocation_id] = callback_stream
+        messages: list[AgentMessage]
         try:
             if settings.opencode_use_pty:
                 messages = await self._execute_with_pty(
@@ -96,16 +169,19 @@ class OpenCodeProvider(BaseProvider):
                     min_message_created_at_ms,
                 )
         except FileNotFoundError:
-            return [
+            messages = [
                 self._normalizer.error(request, f"OpenCode command not found: {command[0]}"),
                 self._normalizer.done(request),
             ]
         except TimeoutError:
-            return [
+            messages = [
                 self._normalizer.error(request, "OpenCode command timed out"),
                 self._normalizer.done(request),
             ]
-
+        finally:
+            summary = await self._close_callback_stream(request, callback_stream)
+        self._annotate_callback_summary(messages, summary)
+        annotate_prompt_version(messages, prompt_version)
         return messages
 
     async def _execute_with_pipes(
@@ -151,6 +227,9 @@ class OpenCodeProvider(BaseProvider):
             if process.returncode is None:
                 process.kill()
                 await process.wait()
+            raise
+        except asyncio.CancelledError:
+            await _terminate_process(process)
             raise
 
     async def _execute_with_pty(
@@ -202,6 +281,9 @@ class OpenCodeProvider(BaseProvider):
                 process.kill()
                 await process.wait()
             raise
+        except asyncio.CancelledError:
+            await _terminate_process(process)
+            raise
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)
@@ -220,6 +302,7 @@ class OpenCodeProvider(BaseProvider):
         session_ids: list[str] = []
         diagnostics = self._empty_diagnostics("pipes")
         parse_run_output = not request.provider_session_id
+        text_reconciler = _IncrementalTextReconciler()
         await asyncio.gather(
             self._read_stdout(
                 request,
@@ -228,6 +311,7 @@ class OpenCodeProvider(BaseProvider):
                 session_ids,
                 diagnostics,
                 parse_run_output,
+                text_reconciler,
                 process_started_at,
                 first_output_state,
             ),
@@ -265,6 +349,7 @@ class OpenCodeProvider(BaseProvider):
         messages: list[AgentMessage] = []
         session_ids: list[str] = []
         diagnostics = self._empty_diagnostics("pty")
+        text_reconciler = _IncrementalTextReconciler()
         buffer = ""
         while True:
             chunk = await asyncio.to_thread(self._read_pty_chunk, master_fd, 0.2)
@@ -281,15 +366,20 @@ class OpenCodeProvider(BaseProvider):
             if request.provider_session_id:
                 continue
             buffer += text
-            buffer = await self._emit_complete_lines(request, buffer, messages, session_ids)
-        if buffer:
-            for message in self._stdout_to_messages(
+            buffer = await self._emit_complete_lines(
                 request,
                 buffer,
+                messages,
                 session_ids,
-            ):
-                messages.append(message)
-                await self._post_stream_message(request, message)
+                text_reconciler,
+            )
+        if buffer:
+            await self._record_stream_messages(
+                request,
+                self._stdout_to_messages(request, buffer, session_ids),
+                messages,
+                text_reconciler,
+            )
         return_code = await process.wait()
         return await self._finalize_process_messages(
             request,
@@ -322,6 +412,7 @@ class OpenCodeProvider(BaseProvider):
         buffer: str,
         messages: list[AgentMessage],
         session_ids: list[str],
+        text_reconciler: _IncrementalTextReconciler,
     ) -> str:
         normalized = buffer.replace("\r\n", "\n").replace("\r", "\n")
         if normalized.endswith("\n"):
@@ -331,10 +422,27 @@ class OpenCodeProvider(BaseProvider):
             lines = normalized.split("\n")
             remainder = lines.pop()
         for line in lines:
-            for message in self._stdout_to_messages(request, line, session_ids):
-                messages.append(message)
-                await self._post_stream_message(request, message)
+            await self._record_stream_messages(
+                request,
+                self._stdout_to_messages(request, line, session_ids),
+                messages,
+                text_reconciler,
+            )
         return remainder
+
+    async def _record_stream_messages(
+        self,
+        request: AgentExecutionRequest,
+        parsed_messages: list[AgentMessage],
+        messages: list[AgentMessage],
+        text_reconciler: _IncrementalTextReconciler,
+    ) -> None:
+        for parsed_message in parsed_messages:
+            message = text_reconciler.reconcile(parsed_message)
+            if message is None:
+                continue
+            messages.append(message)
+            await self._post_stream_message(request, message)
 
     async def _finalize_process_messages(
         self,
@@ -397,6 +505,7 @@ class OpenCodeProvider(BaseProvider):
         session_ids: list[str],
         diagnostics: dict[str, Any],
         parse_output: bool = True,
+        text_reconciler: _IncrementalTextReconciler | None = None,
         process_started_at: float | None = None,
         first_output_state: dict[str, bool] | None = None,
     ) -> None:
@@ -409,9 +518,12 @@ class OpenCodeProvider(BaseProvider):
             self._append_diagnostic_text(diagnostics, "stdout", text + "\n")
             if not parse_output:
                 continue
-            for message in self._stdout_to_messages(request, text, session_ids):
-                messages.append(message)
-                await self._post_stream_message(request, message)
+            await self._record_stream_messages(
+                request,
+                self._stdout_to_messages(request, text, session_ids),
+                messages,
+                text_reconciler or _IncrementalTextReconciler(),
+            )
 
     async def _read_stderr(
         self,
@@ -454,24 +566,32 @@ class OpenCodeProvider(BaseProvider):
             or not self._should_callback_message(message)
         ):
             return
-        try:
-            started_at = time.perf_counter()
-            await CallbackClient(request.callback_base_url, timeout_seconds=2.0).post_message(
-                invocation_id=request.invocation_id,
-                content=message.content,
-                stream=True,
-            )
-            logger.info(
-                "agent_crossing_perf event=provider_callback durationMs=%s provider=opencode invocationId=%s taskId=%s traceId=%s agentId=%s messageType=%s contentChars=%s",
-                _elapsed_ms(started_at),
-                request.invocation_id,
-                request.task_id,
-                request.trace_id,
-                request.agent_id,
-                message.type,
-                len(message.content or ""),
-            )
-        except Exception:
+        callback_stream = self._callback_streams.get(request.invocation_id)
+        if callback_stream is not None:
+            await callback_stream.publish(message.content)
+
+    async def _close_callback_stream(
+        self,
+        request: AgentExecutionRequest,
+        callback_stream: InvocationCallbackStream | None,
+    ) -> CallbackDeliverySummary:
+        self._callback_streams.pop(request.invocation_id, None)
+        if callback_stream is None:
+            return CallbackDeliverySummary(last_sequence=None, completed=False)
+        return await callback_stream.close()
+
+    @staticmethod
+    def _annotate_callback_summary(
+        messages: list[AgentMessage],
+        summary: CallbackDeliverySummary,
+    ) -> None:
+        for message in reversed(messages):
+            if message.type != AgentMessageType.DONE:
+                continue
+            raw = message.raw if isinstance(message.raw, dict) else {}
+            raw["callbackCompleted"] = summary.completed
+            raw["callbackLastSequence"] = summary.last_sequence
+            message.raw = raw
             return
 
     @staticmethod
@@ -589,6 +709,9 @@ class OpenCodeProvider(BaseProvider):
                 process.kill()
                 await process.wait()
             raise
+        except asyncio.CancelledError:
+            await _terminate_process(process)
+            raise
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)
@@ -669,6 +792,8 @@ class OpenCodeProvider(BaseProvider):
         diagnostics["minMessageCreatedAtMs"] = min_message_created_at_ms
         needs_current_run_match = previous_user_marker is not None or min_message_created_at_ms is not None
         export_started_at = time.perf_counter()
+        # export 返回的是完整 session 快照。轮询尝试只在本方法内比较，不向 callback 推送；
+        # 命中当前 run 新增的 assistant 后，由调用方统一发布一次。
         for attempt in range(1, self._SESSION_EXPORT_ATTEMPTS + 1):
             diagnostics["attempts"] = attempt
             try:
@@ -1237,34 +1362,7 @@ class OpenCodeProvider(BaseProvider):
 
     @staticmethod
     def _build_prompt(request: AgentExecutionRequest) -> str:
-        static_prompt = load_prompt_config().static_prompt_for_business_agent(request.agent_id).strip()
-        return (
-            f"{static_prompt}\n\n"
-            "[Invocation Context]\n"
-            f"userId: {request.user_id}\n"
-            f"traceId: {request.trace_id}\n"
-            f"taskId: {request.task_id}\n"
-            "\n"
-            f"{OpenCodeProvider._format_incremental_chat_messages(request)}"
-            f"Task:\n{request.context}\n"
-        )
-
-    @staticmethod
-    def _format_incremental_chat_messages(request: AgentExecutionRequest) -> str:
-        messages = request.context_pack.incremental_chat_messages if request.context_pack else []
-        if not messages:
-            return ""
-        lines = ["[New Conversation Since Last Invocation]"]
-        for message in messages:
-            if message.role == "user":
-                speaker = "User"
-            else:
-                speaker = message.agent_id or "Agent"
-                if message.task_id:
-                    speaker = f"{speaker}/{message.task_id}"
-            lines.append(f"{speaker}: {message.content}")
-        lines.append("")
-        return "\n".join(lines) + "\n"
+        return business_prompt_composer.compose(request)
 
 
 def _elapsed_ms(started_at: float) -> int:

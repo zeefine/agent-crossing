@@ -40,6 +40,10 @@
           "type": ["string", "null"],
           "minLength": 1
         },
+        "providerPromptVersion": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
         "contextPack": {
           "type": "object",
           "additionalProperties": false,
@@ -74,6 +78,21 @@
                   }
                 }
               }
+            },
+            "availableAgents": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["agentId", "displayName", "role", "capabilities", "tools"],
+                "properties": {
+                  "agentId": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+                  "displayName": { "type": "string" },
+                  "role": { "type": "string" },
+                  "capabilities": { "type": "array", "items": { "type": "string" } },
+                  "tools": { "type": "array", "items": { "type": "string" } }
+                }
+              }
             }
           }
         }
@@ -89,6 +108,20 @@
           "items": {
             "$ref": "agent-message.schema.json"
           }
+        },
+        "finalText": {
+          "type": ["string", "null"]
+        },
+        "streamCompleted": {
+          "type": "boolean"
+        },
+        "lastSequence": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "promptVersion": {
+          "type": ["string", "null"],
+          "minLength": 1
         }
       }
     }

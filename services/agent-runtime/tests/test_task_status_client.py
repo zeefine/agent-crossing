@@ -81,7 +81,7 @@ def test_task_status_client_posts_append_only_tasks_to_platform_api() -> None:
         assert request.url.path == "/api/tasks/task-a/append"
         assert request.headers["X-User-Id"] == "user-1"
         assert request.read() == (
-            b'{"tasks":[{"taskId":"task-d","agentId":"opencode","context":"D","dependsOn":[]}]}'
+            b'{"idempotencyKey":"append-task-a-1","tasks":[{"taskId":"task-d","agentId":"opencode","context":"D","dependsOn":[]}]}'
         )
         return httpx.Response(
             200,
@@ -124,6 +124,7 @@ def test_task_status_client_posts_append_only_tasks_to_platform_api() -> None:
             return await client.create_tasks(
                 "task-a",
                 [PlannedTask(taskId="task-d", agentId="opencode", context="D", dependsOn=[])],
+                "append-task-a-1",
                 "user-1",
             )
         finally:

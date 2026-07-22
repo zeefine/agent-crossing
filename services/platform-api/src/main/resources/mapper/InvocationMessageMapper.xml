@@ -15,6 +15,7 @@
             <arg column="content" javaType="java.lang.String"/>
             <arg column="raw_payload" javaType="java.lang.Object"
                  typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler"/>
+            <arg column="sequence_no" javaType="java.lang.Long"/>
             <arg column="created_at" javaType="java.time.Instant"
                  typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
         </constructor>
@@ -23,11 +24,12 @@
     <insert id="upsert" parameterType="com.agentcrossing.platform.domain.message.InvocationMessage">
         INSERT INTO invocation_message (
             message_id, user_id, invocation_id, task_id, trace_id, agent_id,
-            type, content, raw_payload, created_at
+            type, content, raw_payload, sequence_no, created_at
         ) VALUES (
             #{messageId}, #{userId}, #{invocationId}, #{taskId}, #{traceId}, #{agentId},
             #{type}, #{content},
             #{raw, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler},
+            #{sequence},
             #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
         )
         ON DUPLICATE KEY UPDATE
@@ -39,25 +41,39 @@
             type = VALUES(type),
             content = VALUES(content),
             raw_payload = VALUES(raw_payload),
+            sequence_no = VALUES(sequence_no),
             created_at = VALUES(created_at)
     </insert>
 
+    <insert id="insertIgnore" parameterType="com.agentcrossing.platform.domain.message.InvocationMessage">
+        INSERT IGNORE INTO invocation_message (
+            message_id, user_id, invocation_id, task_id, trace_id, agent_id,
+            type, content, raw_payload, sequence_no, created_at
+        ) VALUES (
+            #{messageId}, #{userId}, #{invocationId}, #{taskId}, #{traceId}, #{agentId},
+            #{type}, #{content},
+            #{raw, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler},
+            #{sequence},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+    </insert>
+
     <select id="findByInvocationId" resultMap="InvocationMessageResultMap">
-        SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, created_at
+        SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, sequence_no, created_at
         FROM invocation_message
         WHERE invocation_id = #{invocationId}
         ORDER BY created_at ASC, message_id ASC
     </select>
 
     <select id="findByTraceId" resultMap="InvocationMessageResultMap">
-        SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, created_at
+        SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, sequence_no, created_at
         FROM invocation_message
         WHERE trace_id = #{traceId}
         ORDER BY created_at ASC, message_id ASC
     </select>
 
     <select id="findByTraceIdAndUserId" resultMap="InvocationMessageResultMap">
-        SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, created_at
+        SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, sequence_no, created_at
         FROM invocation_message
         WHERE trace_id = #{traceId} AND user_id = #{userId}
         ORDER BY created_at ASC, message_id ASC

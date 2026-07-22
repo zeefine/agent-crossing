@@ -28,6 +28,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
@@ -150,6 +151,23 @@ class QuestRouterServiceTests {
         caller.shutdownNow();
     }
 
+    @Test
+    void restoresQueuedTaskWhenBusinessWorkerRejectsSubmission() {
+        Task task = task("task-rejected", "opencode");
+        enqueue(task);
+        QuestRouterService rejectingRouter = router(
+                request -> new AgentExecutionResult(List.of()),
+                ignored -> {
+                    throw new RejectedExecutionException("worker queue full");
+                });
+
+        assertThat(rejectingRouter.processNext()).isEmpty();
+        assertThat(taskRepository.findByTaskId(task.taskId()).orElseThrow().status())
+                .isEqualTo(TaskStatus.QUEUED);
+        assertThat(questHub.snapshot()).containsExactly(task.taskId());
+        assertThat(invocationRepository.findAll()).isEmpty();
+    }
+
     private QuestRouterService router(AgentRuntimeClient runtimeClient, java.util.concurrent.Executor workerExecutor) {
         QuestParserService parserService = new QuestParserService(
                 new EmptyParserClient(),
@@ -162,7 +180,6 @@ class QuestRouterServiceTests {
                 invocationRepository,
                 taskRepository,
                 runtimeClient,
-                parserService,
                 "http://127.0.0.1:8080/api/callback",
                 com.agentcrossing.platform.application.routing.TaskDispatchSignal.NOOP,
                 null,

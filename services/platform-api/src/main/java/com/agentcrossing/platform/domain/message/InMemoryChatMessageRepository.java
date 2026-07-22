@@ -35,12 +35,16 @@ public class InMemoryChatMessageRepository implements ChatMessageRepository {
             Instant lastInjectedCreatedAt,
             String lastInjectedMessageId,
             int limit) {
+        Comparator<ChatMessage> chronological =
+                Comparator.comparing(ChatMessage::createdAt).thenComparing(ChatMessage::messageId);
+        // 先截取最新消息，再恢复时间正序，避免 Prompt 中的对话顺序倒置。
         return messages.values().stream()
                 .filter(message -> message.threadId().equals(threadId))
                 .filter(message -> isVisibleToAgent(message, currentAgentId))
                 .filter(message -> isAfterCursor(message, lastInjectedCreatedAt, lastInjectedMessageId))
-                .sorted(Comparator.comparing(ChatMessage::createdAt).thenComparing(ChatMessage::messageId))
+                .sorted(chronological.reversed())
                 .limit(Math.max(limit, 0))
+                .sorted(chronological)
                 .toList();
     }
 

@@ -57,23 +57,28 @@
     </select>
 
     <select id="findVisibleMessagesAfterCursor" resultMap="ChatMessageResultMap">
-        SELECT * FROM chat_message
-        WHERE thread_id = #{threadId}
-          AND (
-            role = 'USER'
-            OR (role = 'ASSISTANT' AND agent_id IS NOT NULL AND agent_id != #{currentAgentId})
-          )
-          <if test="lastInjectedCreatedAt != null and lastInjectedMessageId != null">
-          AND (
-            created_at &gt; #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
-            OR (
-              created_at = #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
-              AND message_id &gt; #{lastInjectedMessageId}
-            )
-          )
-          </if>
-        ORDER BY created_at ASC, message_id ASC
-        LIMIT #{limit}
+        <!-- 内层保留最新消息，外层恢复正序供 Prompt 注入。游标成功推进后，更旧的溢出消息会被丢弃。 -->
+        SELECT recent_messages.*
+        FROM (
+            SELECT * FROM chat_message
+            WHERE thread_id = #{threadId}
+              AND (
+                role = 'USER'
+                OR (role = 'ASSISTANT' AND agent_id IS NOT NULL AND agent_id != #{currentAgentId})
+              )
+              <if test="lastInjectedCreatedAt != null and lastInjectedMessageId != null">
+              AND (
+                created_at &gt; #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+                OR (
+                  created_at = #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+                  AND message_id &gt; #{lastInjectedMessageId}
+                )
+              )
+              </if>
+            ORDER BY created_at DESC, message_id DESC
+            LIMIT #{limit}
+        ) recent_messages
+        ORDER BY recent_messages.created_at ASC, recent_messages.message_id ASC
     </select>
 
     <select id="findAssistantStreamByInvocationId" resultMap="ChatMessageResultMap">

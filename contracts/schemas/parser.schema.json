@@ -51,6 +51,47 @@
         }
       }
     },
+    "ThreadExecutionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threadStatus", "taskStatusCounts", "recentTasks", "latestAgentConclusions"],
+      "properties": {
+        "threadStatus": { "type": "string" },
+        "taskStatusCounts": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "recentTasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["taskId", "agentId", "status", "context", "updatedAt"],
+            "properties": {
+              "taskId": { "type": "string" },
+              "agentId": { "type": "string" },
+              "status": { "type": "string" },
+              "context": { "type": "string" },
+              "updatedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        },
+        "latestAgentConclusions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agentId", "content", "createdAt"],
+            "properties": {
+              "agentId": { "type": "string" },
+              "taskId": { "type": ["string", "null"] },
+              "content": { "type": "string" },
+              "createdAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
     "UserInputParseRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -71,11 +112,20 @@
         "providerSessionId": {
           "type": ["string", "null"]
         },
+        "providerPromptVersion": {
+          "type": ["string", "null"]
+        },
         "availableAgents": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/AvailableAgentCard"
           }
+        },
+        "threadExecutionSummary": {
+          "oneOf": [
+            { "$ref": "#/$defs/ThreadExecutionSummary" },
+            { "type": "null" }
+          ]
         }
       }
     },
@@ -94,6 +144,9 @@
           "type": ["string", "null"]
         },
         "providerSessionId": {
+          "type": ["string", "null"]
+        },
+        "promptVersion": {
           "type": ["string", "null"]
         }
       }

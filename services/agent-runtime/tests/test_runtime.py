@@ -21,6 +21,8 @@ from agent_runtime.main import create_app
 from agent_runtime.providers.claudecode import ClaudeCodeProvider
 from agent_runtime.providers.opencode import OpenCodeProvider
 from agent_runtime.providers.registry import ProviderRegistry
+from agent_runtime.prompt_config import load_prompt_config
+from agent_runtime.prompt_session import prepare_execution_request
 from agent_runtime.runtime.service import AgentRuntimeService
 
 
@@ -33,6 +35,7 @@ def execution_request() -> AgentExecutionRequest:
         agentId="opencode",
         context="hello",
         callbackBaseUrl="http://127.0.0.1:8080/api/callback",
+        providerPromptVersion=load_prompt_config().business_agent_prompt_version("opencode"),
     )
 
 
@@ -60,6 +63,31 @@ def test_runtime_service_routes_to_provider() -> None:
     response = asyncio.run(service.execute(execution_request()))
 
     assert response.messages[0].content == "done"
+    assert response.final_text == "done"
+
+
+def test_runtime_service_exposes_prompt_version_from_done_message() -> None:
+    class VersionedProvider:
+        agent_id = "opencode"
+
+        async def execute(self, request: AgentExecutionRequest) -> list[AgentMessage]:
+            return [
+                AgentMessage(
+                    invocationId=request.invocation_id,
+                    taskId=request.task_id,
+                    traceId=request.trace_id,
+                    agentId=request.agent_id,
+                    type=AgentMessageType.DONE,
+                    raw={"promptVersion": "prompt-v2"},
+                    createdAt=datetime.now(timezone.utc),
+                )
+            ]
+
+    service = AgentRuntimeService(ProviderRegistry([VersionedProvider()]))
+
+    response = asyncio.run(service.execute(execution_request()))
+
+    assert response.prompt_version == "prompt-v2"
 
 
 def test_runtime_service_rejects_unknown_agent() -> None:
@@ -67,6 +95,33 @@ def test_runtime_service_rejects_unknown_agent() -> None:
 
     with pytest.raises(HTTPException):
         asyncio.run(service.execute(execution_request()))
+
+
+def test_runtime_service_cancels_active_execution() -> None:
+    class BlockingProvider:
+        agent_id = "opencode"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def execute(self, request: AgentExecutionRequest) -> list[AgentMessage]:
+            self.started.set()
+            await asyncio.Event().wait()
+            return []
+
+    async def scenario() -> None:
+        provider = BlockingProvider()
+        service = AgentRuntimeService(ProviderRegistry([provider]))
+        execution = asyncio.create_task(service.execute(execution_request()))
+        await provider.started.wait()
+
+        assert await service.cancel("invocation-1") is True
+        response = await execution
+
+        assert response.messages == []
+        assert await service.cancel("invocation-1") is False
+
+    asyncio.run(scenario())
 
 
 def test_default_provider_registry_contains_claudecode() -> None:
@@ -222,7 +277,11 @@ def test_claudecode_provider_uses_provider_session_id_from_request(tmp_path: Pat
         )
     )
     request = execution_request().model_copy(
-        update={"agent_id": "claudecode", "provider_session_id": "claude-existing"}
+        update={
+            "agent_id": "claudecode",
+            "provider_session_id": "claude-existing",
+            "provider_prompt_version": load_prompt_config().business_agent_prompt_version("claudecode"),
+        }
     )
     provider = ClaudeCodeProvider(command=f"{sys.executable} {script}")
 
@@ -341,6 +400,43 @@ def test_claudecode_provider_parses_result_error() -> None:
     assert messages[0].content == "claude failed"
 
 
+def test_claudecode_provider_keeps_successful_stderr_as_diagnostics() -> None:
+    provider = ClaudeCodeProvider(
+        command=(
+            f"{sys.executable} -c \"import json, sys; "
+            "sys.stderr.write('verbose diagnostic\\\\n'); "
+            "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'answer'}]}}))\""
+        )
+    )
+    request = execution_request().model_copy(update={"agent_id": "claudecode"})
+
+    messages = asyncio.run(provider.execute(request))
+
+    assert [message.type for message in messages] == [AgentMessageType.TEXT_DELTA, AgentMessageType.DONE]
+    assert messages[0].content == "answer"
+    assert messages[-1].raw["diagnostics"] == {
+        "stderrChars": len("verbose diagnostic\n"),
+        "stderrTail": "verbose diagnostic\n",
+    }
+
+
+def test_claudecode_provider_marks_nonzero_exit_as_error_with_stderr_diagnostics() -> None:
+    provider = ClaudeCodeProvider(
+        command=(
+            f"{sys.executable} -c \"import sys; "
+            "sys.stderr.write('fatal diagnostic\\\\n'); "
+            "sys.exit(7)\""
+        )
+    )
+    request = execution_request().model_copy(update={"agent_id": "claudecode"})
+
+    messages = asyncio.run(provider.execute(request))
+
+    assert [message.type for message in messages] == [AgentMessageType.ERROR, AgentMessageType.DONE]
+    assert messages[0].content == "Claude Code exited with code 7"
+    assert messages[-1].raw["diagnostics"]["stderrTail"] == "fatal diagnostic\n"
+
+
 def test_opencode_provider_builds_plain_command_and_parses_stdout() -> None:
     provider = OpenCodeProvider(
         command=(
@@ -413,6 +509,35 @@ def test_opencode_provider_keeps_text_after_same_line_banner() -> None:
 
     assert [message.type for message in messages] == [AgentMessageType.TEXT_DELTA, AgentMessageType.DONE]
     assert messages[0].content == "我是 opencode"
+
+
+def test_opencode_provider_normalizes_repeated_and_cumulative_pty_text(tmp_path: Path) -> None:
+    script = tmp_path / "fake_opencode_snapshots.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "print(json.dumps({'type': 'text', 'part': {'text': '完整'}}))",
+                "print(json.dumps({'type': 'text', 'part': {'text': '完整'}}))",
+                "print(json.dumps({'type': 'text', 'part': {'text': '完整回答'}}))",
+            ]
+        )
+    )
+    provider = OpenCodeProvider(command=f"{sys.executable} {script}")
+    posted: list[str] = []
+
+    async def capture_stream_message(_request: AgentExecutionRequest, message: AgentMessage) -> None:
+        if message.content:
+            posted.append(message.content)
+
+    provider._post_stream_message = capture_stream_message  # type: ignore[method-assign]
+    service = AgentRuntimeService(ProviderRegistry([provider]))
+
+    response = asyncio.run(service.execute(execution_request()))
+
+    assert [message.content for message in response.messages[:-1]] == ["完整", "回答"]
+    assert posted == ["完整", "回答"]
+    assert response.final_text == "完整回答"
 
 
 def test_opencode_provider_filters_stderr_banner_in_pipe_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -501,8 +626,11 @@ def test_opencode_provider_injects_incremental_chat_messages_into_prompt() -> No
             f"{sys.executable} -c \"import json, sys; "
             "prompt = sys.argv[-1]; "
             "assert prompt.index('[Rules]') < prompt.index('[Invocation Context]'); "
-            "assert prompt.index('[Invocation Context]') < prompt.index('[New Conversation Since Last Invocation]'); "
+            "assert prompt.index('[Invocation Context]') < prompt.index('[Agent Directory]'); "
+            "assert prompt.index('[Agent Directory]') < prompt.index('[New Conversation Since Last Invocation]'); "
             "assert prompt.index('[New Conversation Since Last Invocation]') < prompt.index('Task:'); "
+            "assert 'agentId=claudecode | name=ClaudeCode | role=Architecture reviewer' in prompt; "
+            "assert 'capabilities=reasoning,code review | tools=shell,filesystem' in prompt; "
             "assert '[New Conversation Since Last Invocation]' in prompt; "
             "assert 'User: user said hi' in prompt; "
             "assert 'claude-code/task-2: peer result' in prompt; "
@@ -519,6 +647,15 @@ def test_opencode_provider_injects_incremental_chat_messages_into_prompt() -> No
         context="hello",
         callbackBaseUrl="http://127.0.0.1:8080/api/callback",
         contextPack={
+            "availableAgents": [
+                {
+                    "agentId": "claudecode",
+                    "displayName": "ClaudeCode",
+                    "role": "Architecture reviewer",
+                    "capabilities": ["reasoning", "code review"],
+                    "tools": ["shell", "filesystem"],
+                }
+            ],
             "incrementalChatMessages": [
                 {
                     "messageId": "message-1",
@@ -571,16 +708,74 @@ def test_opencode_provider_reads_static_prompt_from_config(
     assert "Task:\nhello" in prompt
 
 
+@pytest.mark.parametrize(
+    ("provider_class", "agent_id"),
+    ((OpenCodeProvider, "opencode"), (ClaudeCodeProvider, "claudecode")),
+)
+def test_business_agent_reused_session_omits_static_prompt(
+    provider_class: type[OpenCodeProvider] | type[ClaudeCodeProvider],
+    agent_id: str,
+) -> None:
+    request = execution_request().model_copy(
+        update={
+            "agent_id": agent_id,
+            "provider_session_id": "provider-session-1",
+            "provider_prompt_version": load_prompt_config().business_agent_prompt_version(agent_id),
+        }
+    )
+
+    prompt = provider_class._build_prompt(request)
+
+    assert prompt.startswith("[Invocation Context]")
+    assert "Task:\nhello" in prompt
+
+
+def test_business_agent_rotates_session_when_prompt_version_changes() -> None:
+    request = execution_request().model_copy(
+        update={
+            "provider_session_id": "provider-session-stale",
+            "provider_prompt_version": "legacy",
+        }
+    )
+    current_version = load_prompt_config().business_agent_prompt_version("opencode")
+
+    rotated = prepare_execution_request(request, current_version)
+
+    assert rotated.provider_session_id is None
+    assert rotated.provider_prompt_version is None
+    assert OpenCodeProvider._build_prompt(rotated).startswith("[Role]")
+
+
 def test_business_agent_prompt_limits_multi_turn_collaboration_to_next_hop() -> None:
     opencode_prompt = OpenCodeProvider._build_prompt(execution_request())
     claudecode_prompt = ClaudeCodeProvider._build_prompt(
         execution_request().model_copy(update={"agent_id": "claudecode"})
     )
 
-    assert "每次最多只创建一个下一跳任务" in opencode_prompt
-    assert "不要一次性预生成剩余轮次或完整 DAG" in opencode_prompt
-    assert "每次最多只创建一个下一跳任务" in claudecode_prompt
-    assert "不要一次性预生成剩余轮次或完整 DAG" in claudecode_prompt
+    assert "每轮最多追加一个下一跳" in opencode_prompt
+    assert "不得预生成剩余轮次" in opencode_prompt
+    assert "每轮最多追加一个下一跳" in claudecode_prompt
+    assert "不得预生成剩余轮次" in claudecode_prompt
+
+
+def test_business_agent_providers_share_the_same_prompt_composer() -> None:
+    request = execution_request()
+
+    assert OpenCodeProvider._build_prompt(request) == ClaudeCodeProvider._build_prompt(request)
+
+
+def test_business_agent_prompt_removes_static_agent_roster_and_tool_examples() -> None:
+    prompts = (
+        OpenCodeProvider._build_prompt(execution_request()),
+        ClaudeCodeProvider._build_prompt(execution_request().model_copy(update={"agent_id": "claudecode"})),
+    )
+
+    for prompt in prompts:
+        assert "[Agent Member]" not in prompt
+        assert "[Tool Usage Example]" not in prompt
+        assert prompt.count("\n1. ") == 1
+        assert "\n8. " in prompt
+        assert "\n9. " not in prompt
 
 
 def test_business_agent_prompt_keeps_follow_up_task_context_concise() -> None:
@@ -590,9 +785,9 @@ def test_business_agent_prompt_keeps_follow_up_task_context_concise() -> None:
     )
 
     for prompt in (opencode_prompt, claudecode_prompt):
-        assert "tasks[].context 只能写下一跳任务的简短指令" in prompt
-        assert "不要复制完整对话历史、长段原文、工具调用结果、JSON 代码块" in prompt
-        assert "平台会在下一次执行前自动注入新增会话历史" in prompt
+        assert "tasks[].context 只写可独立执行的简短指令" in prompt
+        assert "不复制对话历史、长原文、工具结果或 JSON" in prompt
+        assert "平台会增量注入用户和其他 agent 的新消息" in prompt
 
 
 def test_business_agent_static_prompt_falls_back_to_default(
@@ -885,6 +1080,81 @@ def test_opencode_provider_ignores_reused_session_run_stdout_and_uses_export(tmp
     assert messages[0].content == "4"
     assert messages[0].raw["source"] == "session_export_fallback"
     assert messages[-1].raw["providerSessionId"] == "ses-existing"
+
+
+def test_opencode_provider_publishes_only_final_matching_export_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    script = tmp_path / "fake_opencode_export_snapshots.py"
+    command_log = tmp_path / "commands.jsonl"
+    old_export_payload = {
+        "messages": [
+            {
+                "info": {"role": "user", "id": "msg-user-old"},
+                "parts": [{"type": "text", "text": "old question"}],
+            },
+            {
+                "info": {"role": "assistant", "id": "msg-assistant-old", "parentID": "msg-user-old"},
+                "parts": [{"type": "text", "text": "old answer"}],
+            },
+        ]
+    }
+    new_export_payload = {
+        "messages": [
+            *old_export_payload["messages"],
+            {
+                "info": {"role": "user", "id": "msg-user-current"},
+                "parts": [{"type": "text", "text": "current question"}],
+            },
+            {
+                "info": {
+                    "role": "assistant",
+                    "id": "msg-assistant-current",
+                    "parentID": "msg-user-current",
+                },
+                "parts": [{"type": "text", "text": "current answer"}],
+            },
+        ]
+    }
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                f"log_path = pathlib.Path({str(command_log)!r})",
+                "with log_path.open('a', encoding='utf-8') as log:",
+                "    log.write(json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')",
+                "export_count = sum(1 for line in log_path.read_text(encoding='utf-8').splitlines() if json.loads(line)[0] == 'export')",
+                "if 'run' in sys.argv[1:]:",
+                "    pass",
+                "elif sys.argv[1:3] == ['export', 'ses-existing']:",
+                "    if export_count < 3:",
+                f"        print(json.dumps({old_export_payload!r}, ensure_ascii=False))",
+                "    else:",
+                f"        print(json.dumps({new_export_payload!r}, ensure_ascii=False))",
+            ]
+        )
+    )
+    provider = OpenCodeProvider(command=f"{sys.executable} {script}")
+    posted: list[str] = []
+
+    async def capture_stream_message(_request: AgentExecutionRequest, message: AgentMessage) -> None:
+        if message.content:
+            posted.append(message.content)
+
+    provider._post_stream_message = capture_stream_message  # type: ignore[method-assign]
+    request = execution_request().model_copy(update={"provider_session_id": "ses-existing"})
+
+    messages = asyncio.run(provider.execute(request))
+
+    assert [message.content for message in messages[:-1]] == ["current answer"]
+    assert posted == ["current answer"]
 
 def test_opencode_provider_waits_for_post_run_assistant_when_baseline_marker_missing(
     monkeypatch: pytest.MonkeyPatch,

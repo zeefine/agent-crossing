@@ -31,7 +31,7 @@ export type ChatMessage = {
   threadId: string;
   role: "user" | "assistant" | "system";
   content: string;
-  status: "created" | "streaming" | "completed" | "failed";
+  status: "created" | "streaming" | "completed" | "failed" | "canceled";
   invocationId: string | null;
   taskId: string | null;
   agentId: string | null;
@@ -49,6 +49,7 @@ export type InvocationMessage = {
   type: "textDelta" | "message" | "done" | "error";
   content: string | null;
   raw: unknown;
+  sequence: number | null;
   createdAt: string;
 };
 
@@ -142,6 +143,13 @@ export function sendMessage(threadId: string, content: string) {
     method: "POST",
     body: JSON.stringify({ content })
   });
+}
+
+export function cancelThreadWork(threadId: string) {
+  return request<{ threadId: string; canceledTaskIds: string[]; canceledInvocationIds: string[] }>(
+    `/api/chat/threads/${threadId}/cancel`,
+    { method: "POST" }
+  );
 }
 
 export function listAgents() {

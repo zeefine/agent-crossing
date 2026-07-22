@@ -46,6 +46,7 @@ class TaskStatusClient:
         self,
         source_task_id: str,
         tasks: list[PlannedTask],
+        idempotency_key: str,
         user_id: str = "anonymous",
     ) -> CreateTasksResult:
         url = urljoin(self._platform_api_base_url, f"api/tasks/{source_task_id}/append")
@@ -53,7 +54,10 @@ class TaskStatusClient:
             response = await client.post(
                 url,
                 headers={"X-User-Id": user_id},
-                json={"tasks": [task.model_dump(mode="json", by_alias=True) for task in tasks]},
+                json={
+                    "idempotencyKey": idempotency_key,
+                    "tasks": [task.model_dump(mode="json", by_alias=True) for task in tasks],
+                },
             )
             response.raise_for_status()
 

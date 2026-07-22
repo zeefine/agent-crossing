@@ -2,12 +2,12 @@ package com.agentcrossing.platform.application.invocation;
 
 import com.agentcrossing.platform.application.chat.AssistantStreamBuffer;
 import com.agentcrossing.platform.application.chat.ChatEventService;
-import com.agentcrossing.platform.application.parser.QuestParserService;
+import com.agentcrossing.platform.application.chat.ThreadPlanningQueue;
+import com.agentcrossing.platform.application.chat.ThreadStatusAggregator;
 import com.agentcrossing.platform.application.realtime.RealtimeEventTypes;
 import com.agentcrossing.platform.application.routing.TaskDispatchSignal;
 import com.agentcrossing.platform.application.task.TaskEventService;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
-import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
 import com.agentcrossing.platform.domain.invocation.InvocationStatus;
@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -40,7 +41,6 @@ public class InvocationService {
     private final TaskRepository taskRepository;
     private final TaskDependencyRepository taskDependencyRepository;
     private final AgentRuntimeClient agentRuntimeClient;
-    private final QuestParserService questParserService;
     private final String callbackBaseUrl;
     private final TaskDispatchSignal taskDispatchSignal;
     private final InvocationMessageRepository invocationMessageRepository;
@@ -51,12 +51,12 @@ public class InvocationService {
     private final AssistantStreamBuffer assistantStreamBuffer;
     private final AgentContextService agentContextService;
     private final AgentSessionRepository agentSessionRepository;
+    private final ThreadStatusAggregator threadStatusAggregator;
 
     public InvocationService(
             InvocationRepository invocationRepository,
             TaskRepository taskRepository,
             AgentRuntimeClient agentRuntimeClient,
-            QuestParserService questParserService,
             @Value("${agent-crossing.callback-base-url:http://127.0.0.1:8080/api/callback}") String callbackBaseUrl,
             TaskDispatchSignal taskDispatchSignal,
             InvocationMessageRepository invocationMessageRepository,
@@ -68,11 +68,50 @@ public class InvocationService {
             TaskDependencyRepository taskDependencyRepository,
             AgentContextService agentContextService,
             AgentSessionRepository agentSessionRepository) {
+        this(
+                invocationRepository,
+                taskRepository,
+                agentRuntimeClient,
+                callbackBaseUrl,
+                taskDispatchSignal,
+                invocationMessageRepository,
+                chatThreadRepository,
+                chatMessageRepository,
+                chatEventService,
+                taskEventService,
+                assistantStreamBuffer,
+                taskDependencyRepository,
+                agentContextService,
+                agentSessionRepository,
+                new ThreadStatusAggregator(
+                        chatThreadRepository,
+                        taskRepository,
+                        invocationRepository,
+                        new ThreadPlanningQueue(Runnable::run),
+                        chatEventService));
+    }
+
+    @Autowired
+    public InvocationService(
+            InvocationRepository invocationRepository,
+            TaskRepository taskRepository,
+            AgentRuntimeClient agentRuntimeClient,
+            @Value("${agent-crossing.callback-base-url:http://127.0.0.1:8080/api/callback}") String callbackBaseUrl,
+            TaskDispatchSignal taskDispatchSignal,
+            InvocationMessageRepository invocationMessageRepository,
+            ChatThreadRepository chatThreadRepository,
+            ChatMessageRepository chatMessageRepository,
+            ChatEventService chatEventService,
+            TaskEventService taskEventService,
+            AssistantStreamBuffer assistantStreamBuffer,
+            TaskDependencyRepository taskDependencyRepository,
+            AgentContextService agentContextService,
+            AgentSessionRepository agentSessionRepository,
+            ThreadStatusAggregator threadStatusAggregator) {
         this.invocationRepository = invocationRepository;
         this.taskRepository = taskRepository;
         this.taskDependencyRepository = taskDependencyRepository;
         this.agentRuntimeClient = agentRuntimeClient;
-        this.questParserService = questParserService;
         this.callbackBaseUrl = callbackBaseUrl;
         this.taskDispatchSignal = taskDispatchSignal;
         this.invocationMessageRepository = invocationMessageRepository;
@@ -83,6 +122,7 @@ public class InvocationService {
         this.assistantStreamBuffer = assistantStreamBuffer;
         this.agentContextService = agentContextService;
         this.agentSessionRepository = agentSessionRepository;
+        this.threadStatusAggregator = threadStatusAggregator;
     }
 
     public Invocation execute(Task task) {
@@ -94,6 +134,7 @@ public class InvocationService {
 
         try {
             AgentContextPack contextPack = buildContextPack(task);
+            AgentSession providerSession = findProviderSession(task);
             long runtimeStartedAt = System.nanoTime();
             AgentExecutionResult result = agentRuntimeClient.execute(new AgentExecutionRequest(
                     invocation.invocationId(),
@@ -104,7 +145,8 @@ public class InvocationService {
                     task.context(),
                     callbackBaseUrl,
                     contextPack,
-                    findProviderSessionId(task)));
+                    providerSession == null ? null : providerSession.providerSessionId(),
+                    providerSession == null ? null : providerSession.promptVersion()));
             log.info(
                     "agent_crossing_perf event=business_agent_runtime durationMs={} userId={} invocationId={} taskId={} traceId={} agentId={} messages={}",
                     elapsedMs(runtimeStartedAt),
@@ -114,23 +156,26 @@ public class InvocationService {
                     task.traceId(),
                     task.agentId(),
                     result.messages().size());
+            if (isCanceled(invocation.invocationId(), task.taskId())) {
+                return finishCanceledInvocation(invocation, task);
+            }
             rememberProviderSession(task, result);
             persistAgentMessages(invocation, result);
             if (result.hasError()) {
                 throw new RuntimeException(result.errorOutput());
             }
+            reconcileFinalText(invocation, result.finalText());
             invocation = invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.SUCCEEDED);
             Task completedTask = taskRepository.updateStatus(task.taskId(), TaskStatus.COMPLETED);
             markAssistantStreamFinal(invocation.invocationId(), ChatMessageStatus.COMPLETED, null);
             publishTask(completedTask);
-            updateThreadStatus(
-                    completedTask.traceId(),
-                    hasOpenTasks(completedTask.traceId(), completedTask.userId())
-                            ? ChatThreadStatus.RUNNING
-                            : ChatThreadStatus.COMPLETED);
+            threadStatusAggregator.refreshForTrace(completedTask.userId(), completedTask.traceId());
             acknowledgeInjectedContext(task, contextPack);
             return invocation;
         } catch (RuntimeException exception) {
+            if (isCanceled(invocation.invocationId(), task.taskId())) {
+                return finishCanceledInvocation(invocation, task);
+            }
             invocation = invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.FAILED);
             Task failedTask = taskRepository.updateStatus(task.taskId(), TaskStatus.FAILED);
             publishTask(failedTask);
@@ -151,12 +196,39 @@ public class InvocationService {
                         errorMessage,
                         ChatMessageStatus.FAILED);
             }
-            updateThreadStatus(failedTask.traceId(), ChatThreadStatus.FAILED);
             blockDependentDescendants(failedTask);
+            threadStatusAggregator.refreshForTrace(failedTask.userId(), failedTask.traceId());
             return invocation;
         } finally {
             taskDispatchSignal.signal();
         }
+    }
+
+    /**
+     * A stop request updates persistence before the runtime is interrupted. Runtime HTTP can still return normally
+     * (or fail) afterwards, so both paths must re-read status before writing a terminal result.
+     */
+    private boolean isCanceled(String invocationId, String taskId) {
+        boolean invocationCanceled = invocationRepository.findByInvocationId(invocationId)
+                .map(current -> current.status() == InvocationStatus.CANCELED)
+                .orElse(false);
+        boolean taskCanceled = taskRepository.findByTaskId(taskId)
+                .map(current -> current.status() == TaskStatus.CANCELED)
+                .orElse(false);
+        return invocationCanceled || taskCanceled;
+    }
+
+    private Invocation finishCanceledInvocation(Invocation invocation, Task task) {
+        Invocation canceled = invocationRepository.findByInvocationId(invocation.invocationId())
+                .filter(current -> current.status() == InvocationStatus.CANCELED)
+                .orElseGet(() -> invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.CANCELED));
+        Task canceledTask = taskRepository.findByTaskId(task.taskId())
+                .filter(current -> current.status() == TaskStatus.CANCELED)
+                .orElseGet(() -> taskRepository.updateStatus(task.taskId(), TaskStatus.CANCELED));
+        markAssistantStreamFinal(canceled.invocationId(), ChatMessageStatus.CANCELED, null);
+        publishTask(canceledTask);
+        threadStatusAggregator.refreshForTrace(canceledTask.userId(), canceledTask.traceId());
+        return canceled;
     }
 
     private Invocation createInvocation(Task task) {
@@ -184,7 +256,7 @@ public class InvocationService {
         }
     }
 
-    private String findProviderSessionId(Task task) {
+    private AgentSession findProviderSession(Task task) {
         if (agentSessionRepository == null) {
             return null;
         }
@@ -194,7 +266,6 @@ public class InvocationService {
         }
         return agentSessionRepository
                 .findByThreadId(task.userId(), threadId, task.agentId(), providerFor(task))
-                .map(AgentSession::providerSessionId)
                 .orElse(null);
     }
 
@@ -203,7 +274,11 @@ public class InvocationService {
             return;
         }
         String providerSessionId = result.providerSessionId();
-        if (providerSessionId == null || providerSessionId.isBlank()) {
+        String promptVersion = result.promptVersion();
+        if (providerSessionId == null
+                || providerSessionId.isBlank()
+                || promptVersion == null
+                || promptVersion.isBlank()) {
             return;
         }
         String threadId = findThreadId(task);
@@ -223,6 +298,7 @@ public class InvocationService {
                 task.agentId(),
                 provider,
                 providerSessionId,
+                promptVersion,
                 createdAt,
                 now));
     }
@@ -377,21 +453,55 @@ public class InvocationService {
         publishChatMessage(saved);
     }
 
-    private void updateThreadStatus(String traceId, ChatThreadStatus status) {
-        if (chatThreadRepository == null) {
+    /**
+     * runtime 最终响应里的 finalText 是本轮权威正文。流式 callback 只负责实时体验，可能因为网络
+     * 抖动缺少分片；终态在这里覆盖校准同一条 chat_message，避免部分 callback 成功后留下残缺内容。
+     */
+    private void reconcileFinalText(Invocation invocation, String finalText) {
+        if (chatThreadRepository == null
+                || chatMessageRepository == null
+                || finalText == null
+                || finalText.isBlank()) {
             return;
         }
-        chatThreadRepository
-                .findByTraceId(traceId)
-                .ifPresent(thread -> {
-                    var updated = chatThreadRepository.updateStatus(thread.threadId(), status);
-                    publishThread(updated);
-                });
-    }
-
-    private boolean hasOpenTasks(String traceId, String userId) {
-        return taskRepository.findByTraceIdAndUserId(traceId, userId).stream()
-                .anyMatch(task -> task.status() == TaskStatus.QUEUED || task.status() == TaskStatus.PROCESSING);
+        // 先把 callback 内存缓冲中的尾分片落库并移除 buffer，再用 finalText 覆盖。
+        // 顺序不能反过来，否则后续 drain 会用旧的累积正文覆盖权威终态。
+        if (assistantStreamBuffer != null) {
+            assistantStreamBuffer.drain(invocation.invocationId());
+        }
+        chatThreadRepository.findByTraceId(invocation.traceId()).ifPresent(thread -> {
+            ChatMessage existing = chatMessageRepository
+                    .findAssistantStreamByInvocationId(invocation.invocationId())
+                    .orElse(null);
+            if (existing != null && finalText.equals(existing.content())) {
+                return;
+            }
+            Instant now = Instant.now();
+            ChatMessage reconciled = existing == null
+                    ? new ChatMessage(
+                            "message-" + UUID.randomUUID(),
+                            thread.threadId(),
+                            ChatMessageRole.ASSISTANT,
+                            finalText,
+                            ChatMessageStatus.STREAMING,
+                            invocation.invocationId(),
+                            invocation.taskId(),
+                            invocation.agentId(),
+                            now,
+                            now)
+                    : new ChatMessage(
+                            existing.messageId(),
+                            existing.threadId(),
+                            existing.role(),
+                            finalText,
+                            ChatMessageStatus.STREAMING,
+                            existing.invocationId(),
+                            existing.taskId(),
+                            existing.agentId(),
+                            existing.createdAt(),
+                            now);
+            publishChatMessage(chatMessageRepository.save(reconciled));
+        });
     }
 
     private void publishInvocationMessage(InvocationMessage message) {

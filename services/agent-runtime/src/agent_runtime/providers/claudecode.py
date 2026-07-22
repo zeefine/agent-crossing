@@ -6,10 +6,16 @@ import shlex
 import time
 from typing import Any
 
-from agent_runtime.callback.client import CallbackClient
+from agent_runtime.callback.dispatcher import (
+    CallbackDeliverySummary,
+    CallbackDispatcher,
+    InvocationCallbackStream,
+)
+from agent_runtime.business_prompt import business_prompt_composer
 from agent_runtime.config import settings
 from agent_runtime.contracts.models import AgentExecutionRequest, AgentMessage, AgentMessageType
 from agent_runtime.prompt_config import load_prompt_config
+from agent_runtime.prompt_session import annotate_prompt_version, prepare_execution_request
 from agent_runtime.providers.base import BaseProvider
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 
@@ -17,22 +23,49 @@ from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 logger = logging.getLogger(__name__)
 
 
+async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:
+    if process is None or process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+
+
 class ClaudeCodeProvider(BaseProvider):
+    _DIAGNOSTIC_TAIL_CHARS = 4000
+
     def __init__(
         self,
         command: str | None = None,
         timeout_seconds: float | None = None,
         normalizer: AgentMessageNormalizer | None = None,
+        callback_dispatcher: CallbackDispatcher | None = None,
     ) -> None:
         self._command = command or settings.claudecode_command
         self._timeout_seconds = timeout_seconds or settings.provider_timeout_seconds
         self._normalizer = normalizer or AgentMessageNormalizer()
+        self._callback_dispatcher = callback_dispatcher or CallbackDispatcher()
+        self._callback_streams: dict[str, InvocationCallbackStream] = {}
 
     @property
     def agent_id(self) -> str:
         return "claudecode"
 
     async def execute(self, request: AgentExecutionRequest) -> list[AgentMessage]:
+        prompt_config = load_prompt_config()
+        prompt_version = prompt_config.business_agent_prompt_version(request.agent_id)
+        original_session_id = request.provider_session_id
+        request = prepare_execution_request(request, prompt_version)
+        if original_session_id and not request.provider_session_id:
+            logger.info(
+                "Rotating ClaudeCode session because the static prompt version changed: invocationId=%s taskId=%s agentId=%s",
+                request.invocation_id,
+                request.task_id,
+                request.agent_id,
+            )
         command = self._build_command(request)
         if not command:
             return [
@@ -54,7 +87,11 @@ class ClaudeCodeProvider(BaseProvider):
         if request.callback_base_url:
             env["AGENT_CROSSING_CALLBACK_BASE_URL"] = request.callback_base_url
 
+        callback_stream = self._callback_dispatcher.open_stream(request)
+        if callback_stream is not None:
+            self._callback_streams[request.invocation_id] = callback_stream
         process: asyncio.subprocess.Process | None = None
+        messages: list[AgentMessage]
         try:
             cli_start = time.perf_counter()
             process = await asyncio.create_subprocess_exec(
@@ -80,7 +117,7 @@ class ClaudeCodeProvider(BaseProvider):
                 timeout=self._timeout_seconds,
             )
         except FileNotFoundError:
-            return [
+            messages = [
                 self._normalizer.error(request, f"Claude Code command not found: {command[0]}"),
                 self._normalizer.done(request),
             ]
@@ -88,11 +125,17 @@ class ClaudeCodeProvider(BaseProvider):
             if process is not None and process.returncode is None:
                 process.kill()
                 await process.wait()
-            return [
+            messages = [
                 self._normalizer.error(request, "Claude Code command timed out"),
                 self._normalizer.done(request),
             ]
-
+        except asyncio.CancelledError:
+            await _terminate_process(process)
+            raise
+        finally:
+            summary = await self._close_callback_stream(request, callback_stream)
+        self._annotate_callback_summary(messages, summary)
+        annotate_prompt_version(messages, prompt_version)
         return messages
 
     async def _collect_process_messages(
@@ -104,17 +147,23 @@ class ClaudeCodeProvider(BaseProvider):
     ) -> list[AgentMessage]:
         messages: list[AgentMessage] = []
         session_ids: list[str] = []
+        diagnostics = self._empty_diagnostics()
         await asyncio.gather(
             self._read_stdout(request, process, messages, session_ids, process_started_at, first_output_state),
-            self._read_stderr(request, process, messages, process_started_at, first_output_state),
+            self._read_stderr(request, process, diagnostics, process_started_at, first_output_state),
         )
         return_code = await process.wait()
         session_id = session_ids[-1] if session_ids else None
+        self._log_stderr_diagnostics(request, diagnostics)
         if return_code not in (0, None):
             error = self._normalizer.error(
                 request,
                 f"Claude Code exited with code {return_code}",
-                raw={"provider": "claudecode", "returnCode": return_code},
+                raw={
+                    "provider": "claudecode",
+                    "returnCode": return_code,
+                    "diagnostics": diagnostics,
+                },
             )
             messages.append(error)
             await self._post_stream_message(request, error)
@@ -123,7 +172,14 @@ class ClaudeCodeProvider(BaseProvider):
             messages.append(message)
             await self._post_stream_message(request, message)
 
-        done = self._normalizer.done(request, raw={"provider": "claudecode", "returnCode": return_code})
+        done = self._normalizer.done(
+            request,
+            raw={
+                "provider": "claudecode",
+                "returnCode": return_code,
+                "diagnostics": diagnostics,
+            },
+        )
         if session_id:
             done.raw["sessionId"] = session_id
             done.raw["providerSessionId"] = session_id
@@ -159,7 +215,7 @@ class ClaudeCodeProvider(BaseProvider):
         self,
         request: AgentExecutionRequest,
         process: asyncio.subprocess.Process,
-        messages: list[AgentMessage],
+        diagnostics: dict[str, Any],
         process_started_at: float,
         first_output_state: dict[str, bool],
     ) -> None:
@@ -170,13 +226,7 @@ class ClaudeCodeProvider(BaseProvider):
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
             if not text:
                 continue
-            message = self._normalizer.error(
-                request,
-                text,
-                raw={"provider": "claudecode", "stream": "stderr"},
-            )
-            messages.append(message)
-            await self._post_stream_message(request, message)
+            self._append_stderr_diagnostic(diagnostics, text + "\n")
 
     async def _post_stream_message(self, request: AgentExecutionRequest, message: AgentMessage) -> None:
         if (
@@ -185,24 +235,32 @@ class ClaudeCodeProvider(BaseProvider):
             or not self._should_callback_message(message)
         ):
             return
-        try:
-            started_at = time.perf_counter()
-            await CallbackClient(request.callback_base_url, timeout_seconds=2.0).post_message(
-                invocation_id=request.invocation_id,
-                content=message.content,
-                stream=True,
-            )
-            logger.info(
-                "agent_crossing_perf event=provider_callback durationMs=%s provider=claudecode invocationId=%s taskId=%s traceId=%s agentId=%s messageType=%s contentChars=%s",
-                _elapsed_ms(started_at),
-                request.invocation_id,
-                request.task_id,
-                request.trace_id,
-                request.agent_id,
-                message.type,
-                len(message.content or ""),
-            )
-        except Exception:
+        callback_stream = self._callback_streams.get(request.invocation_id)
+        if callback_stream is not None:
+            await callback_stream.publish(message.content)
+
+    async def _close_callback_stream(
+        self,
+        request: AgentExecutionRequest,
+        callback_stream: InvocationCallbackStream | None,
+    ) -> CallbackDeliverySummary:
+        self._callback_streams.pop(request.invocation_id, None)
+        if callback_stream is None:
+            return CallbackDeliverySummary(last_sequence=None, completed=False)
+        return await callback_stream.close()
+
+    @staticmethod
+    def _annotate_callback_summary(
+        messages: list[AgentMessage],
+        summary: CallbackDeliverySummary,
+    ) -> None:
+        for message in reversed(messages):
+            if message.type != AgentMessageType.DONE:
+                continue
+            raw = message.raw if isinstance(message.raw, dict) else {}
+            raw["callbackCompleted"] = summary.completed
+            raw["callbackLastSequence"] = summary.last_sequence
+            message.raw = raw
             return
 
     @staticmethod
@@ -363,6 +421,29 @@ class ClaudeCodeProvider(BaseProvider):
         )
 
     @staticmethod
+    def _empty_diagnostics() -> dict[str, Any]:
+        return {"stderrChars": 0, "stderrTail": ""}
+
+    @classmethod
+    def _append_stderr_diagnostic(cls, diagnostics: dict[str, Any], text: str) -> None:
+        diagnostics["stderrChars"] = int(diagnostics.get("stderrChars", 0)) + len(text)
+        diagnostics["stderrTail"] = (str(diagnostics.get("stderrTail", "")) + text)[-cls._DIAGNOSTIC_TAIL_CHARS :]
+
+    @staticmethod
+    def _log_stderr_diagnostics(request: AgentExecutionRequest, diagnostics: dict[str, Any]) -> None:
+        stderr_chars = int(diagnostics.get("stderrChars", 0))
+        if stderr_chars == 0:
+            return
+        logger.info(
+            "Claude Code stderr captured provider=claudecode invocationId=%s taskId=%s traceId=%s agentId=%s stderrChars=%s",
+            request.invocation_id,
+            request.task_id,
+            request.trace_id,
+            request.agent_id,
+            stderr_chars,
+        )
+
+    @staticmethod
     def _parse_json_line(line: str) -> dict[str, Any] | None:
         try:
             event = json.loads(line)
@@ -409,34 +490,7 @@ class ClaudeCodeProvider(BaseProvider):
 
     @staticmethod
     def _build_prompt(request: AgentExecutionRequest) -> str:
-        static_prompt = load_prompt_config().static_prompt_for_business_agent(request.agent_id).strip()
-        return (
-            f"{static_prompt}\n\n"
-            "[Invocation Context]\n"
-            f"userId: {request.user_id}\n"
-            f"traceId: {request.trace_id}\n"
-            f"taskId: {request.task_id}\n"
-            "\n"
-            f"{ClaudeCodeProvider._format_incremental_chat_messages(request)}"
-            f"Task:\n{request.context}\n"
-        )
-
-    @staticmethod
-    def _format_incremental_chat_messages(request: AgentExecutionRequest) -> str:
-        messages = request.context_pack.incremental_chat_messages if request.context_pack else []
-        if not messages:
-            return ""
-        lines = ["[New Conversation Since Last Invocation]"]
-        for message in messages:
-            if message.role == "user":
-                speaker = "User"
-            else:
-                speaker = message.agent_id or "Agent"
-                if message.task_id:
-                    speaker = f"{speaker}/{message.task_id}"
-            lines.append(f"{speaker}: {message.content}")
-        lines.append("")
-        return "\n".join(lines) + "\n"
+        return business_prompt_composer.compose(request)
 
     @staticmethod
     def _has_content_message(messages: list[AgentMessage]) -> bool:

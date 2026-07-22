@@ -15,6 +15,7 @@ from agent_runtime.master_agent import mcp_server
 from agent_runtime.master_agent.master_agent_planner import MasterAgentPlanner
 from agent_runtime.master_agent.planning_sessions import PlanningResult, PlanningSessionStore, planning_session_store
 from agent_runtime.main import create_app
+from agent_runtime.prompt_config import load_prompt_config
 
 
 def agent_card(agent_id: str, display_name: str | None = None) -> AvailableAgentCard:
@@ -33,6 +34,27 @@ def test_master_agent_prompt_places_static_rules_before_dynamic_context() -> Non
         UserInputParseRequest(
             input="分析当前项目",
             availableAgents=[agent_card("opencode", "OpenCode")],
+            threadExecutionSummary={
+                "threadStatus": "running",
+                "taskStatusCounts": {"completed": 2, "processing": 1},
+                "recentTasks": [
+                    {
+                        "taskId": "task-1",
+                        "agentId": "opencode",
+                        "status": "processing",
+                        "context": "分析后端性能",
+                        "updatedAt": "2026-07-17T10:00:00Z",
+                    }
+                ],
+                "latestAgentConclusions": [
+                    {
+                        "agentId": "claudecode",
+                        "taskId": "task-0",
+                        "content": "数据库连接池是当前主要瓶颈。",
+                        "createdAt": "2026-07-17T09:59:00Z",
+                    }
+                ],
+            },
         ),
     )
 
@@ -49,7 +71,14 @@ def test_master_agent_prompt_places_static_rules_before_dynamic_context() -> Non
     )
     assert prompt.index("Tool input rules for submit_task_plan:") < prompt.index("[Planning Context]")
     assert prompt.index("[Planning Context]") < prompt.index("planningSessionId: planning-session-1")
-    assert prompt.index("availableAgents:") < prompt.index("[User Input]")
+    dynamic_directory_index = prompt.index("[Agent Directory]\n- agentId=")
+    assert prompt.index("planningSessionId: planning-session-1") < dynamic_directory_index
+    assert "agentId=opencode | name=OpenCode | role=Coding agent" in prompt
+    assert "capabilities=implementation,project analysis | tools=filesystem,shell" in prompt
+    assert dynamic_directory_index < prompt.index("[Thread Execution Summary]")
+    assert '\"threadStatus\":\"running\"' in prompt
+    assert '\"content\":\"数据库连接池是当前主要瓶颈。\"' in prompt
+    assert prompt.index("[Thread Execution Summary]") < prompt.index("[User Input]")
     assert prompt.rstrip().endswith("分析当前项目")
 
 
@@ -80,7 +109,7 @@ def test_master_agent_reads_static_prompt_from_config(
 
 def test_master_agent_collapses_self_orchestrated_dialogue_to_seed_task() -> None:
     request = UserInputParseRequest(
-        input="让claudecode和opencode互相@讨论 AI替代程序员的可能性，每轮不超过200字，你不要干预。",
+        input="让claudecode和opencode进行3轮辩论，讨论 AI替代程序员的可能性，每轮不超过100字，最后有辩论结果。",
         availableAgents=[agent_card("claudecode"), agent_card("opencode")],
     )
     planning_result = PlanningResult(
@@ -111,6 +140,35 @@ def test_master_agent_collapses_self_orchestrated_dialogue_to_seed_task() -> Non
     assert [task.task_id for task in response.tasks] == ["task-seed"]
     assert response.tasks[0].depends_on == []
     assert "只创建一个下一跳任务" in response.tasks[0].context
+    assert "[Self-Orchestration Contract]" in response.tasks[0].context
+    assert '"participants":["claudecode","opencode"]' in response.tasks[0].context
+    assert '"turnsPerParticipant":3' in response.tasks[0].context
+    assert '"requiresFinalResult":true' in response.tasks[0].context
+    assert "每个参与者都必须各完成 N 次" in response.tasks[0].context
+
+
+def test_master_agent_adds_contract_when_model_already_returns_one_seed_task() -> None:
+    request = UserInputParseRequest(
+        input="让claudecode和opencode轮流进行2轮对话",
+        availableAgents=[agent_card("claudecode"), agent_card("opencode")],
+    )
+    response = MasterAgentPlanner._to_response(
+        PlanningResult(
+            tasks=[
+                PlannedTask(
+                    taskId="task-seed",
+                    agentId="claudecode",
+                    context="请开始第一轮。",
+                    dependsOn=[],
+                )
+            ]
+        ),
+        request,
+    )
+
+    assert len(response.tasks) == 1
+    assert '"turnsPerParticipant":2' in response.tasks[0].context
+    assert '"requiresFinalResult":false' in response.tasks[0].context
 
 
 def test_master_agent_builds_claudecode_command_with_mcp_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,18 +179,34 @@ def test_master_agent_builds_claudecode_command_with_mcp_config(monkeypatch: pyt
         UserInputParseRequest(
             input="你是谁",
             providerSessionId="claude-existing",
+            providerPromptVersion=load_prompt_config().master_agent_prompt_version(),
             availableAgents=[agent_card("opencode")],
         ),
     )
 
     assert command[0:2] == [settings.master_agent_command, "-p"]
-    assert command[2].startswith("You are the Agent Crossing MasterAgent.")
+    assert command[2].startswith("[Planning Context]")
     assert command[3:7] == ["--output-format", "stream-json", "--verbose", "--permission-mode"]
     assert command[7] == settings.claudecode_permission_mode
     assert command[command.index("--mcp-config") + 1] == mcp_config
     assert command[command.index("--resume") + 1] == "claude-existing"
     assert "--agent" not in command
     assert "run" not in command
+
+
+def test_master_agent_rotates_session_when_prompt_version_changes() -> None:
+    command = MasterAgentPlanner()._build_command(
+        "planning-session-1",
+        UserInputParseRequest(
+            input="继续分析",
+            providerSessionId="claude-stale",
+            providerPromptVersion="legacy",
+            availableAgents=[agent_card("opencode")],
+        ),
+    )
+
+    assert "--resume" not in command
+    assert command[2].startswith("You are the Agent Crossing MasterAgent.")
 
 
 def test_master_agent_builds_default_http_mcp_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -514,16 +588,17 @@ def test_fastmcp_get_task_status_snapshot_queries_platform_state(monkeypatch: py
 
 
 def test_fastmcp_create_tasks_appends_platform_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str, list[str]]] = []
+    calls: list[tuple[str, str, str, list[str]]] = []
 
     class FakeTaskStatusClient:
         async def create_tasks(
             self,
             source_task_id: str,
             tasks: list[PlannedTask],
+            idempotency_key: str,
             user_id: str,
         ) -> CreateTasksResult:
-            calls.append((source_task_id, user_id, [task.task_id for task in tasks]))
+            calls.append((source_task_id, user_id, idempotency_key, [task.task_id for task in tasks]))
             return CreateTasksResult(
                 sourceTaskId=source_task_id,
                 userId=user_id,
@@ -539,6 +614,7 @@ def test_fastmcp_create_tasks_appends_platform_tasks(monkeypatch: pytest.MonkeyP
                 "create_tasks",
                 {
                     "sourceTaskId": "task-a",
+                    "idempotencyKey": "append-task-a-1",
                     "userId": "user-1",
                     "tasks": [
                         {
@@ -553,7 +629,7 @@ def test_fastmcp_create_tasks_appends_platform_tasks(monkeypatch: pytest.MonkeyP
 
     asyncio.run(scenario())
 
-    assert calls == [("task-a", "user-1", ["task-d"])]
+    assert calls == [("task-a", "user-1", "append-task-a-1", ["task-d"])]
 
 
 def test_fastmcp_create_tasks_rejects_full_history_sized_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -562,6 +638,7 @@ def test_fastmcp_create_tasks_rejects_full_history_sized_context(monkeypatch: py
             self,
             source_task_id: str,
             tasks: list[PlannedTask],
+            idempotency_key: str,
             user_id: str,
         ) -> CreateTasksResult:
             return CreateTasksResult(
@@ -579,6 +656,7 @@ def test_fastmcp_create_tasks_rejects_full_history_sized_context(monkeypatch: py
                 "create_tasks",
                 {
                     "sourceTaskId": "task-a",
+                    "idempotencyKey": "append-task-a-oversized",
                     "userId": "user-1",
                     "tasks": [
                         {

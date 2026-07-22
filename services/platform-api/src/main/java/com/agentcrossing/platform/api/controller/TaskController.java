@@ -96,7 +96,7 @@ public class TaskController {
         List<ParsedTask> plannedTasks = request.tasks().stream()
                 .map(task -> new ParsedTask(task.taskId(), task.agentId(), task.context(), task.dependsOn()))
                 .toList();
-        return ApiResponse.ok(questParserService.appendAgentTasks(sourceTask, plannedTasks).stream()
+        return ApiResponse.ok(questParserService.appendAgentTasks(sourceTask, plannedTasks, request.idempotencyKey()).stream()
                 .map(this::toResponse)
                 .toList());
     }

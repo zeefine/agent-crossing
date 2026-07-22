@@ -24,7 +24,8 @@ master_agent_mcp = FastMCP(
         "Crossing planning session. Use get_task_status_snapshot before creating "
         "follow-up tasks. get_task_status_snapshot returns the direct downstream "
         "tasks of the current task, sorted by createdAt. Use create_tasks to "
-        "append new tasks without modifying the existing DAG."
+        "append new tasks without modifying the existing DAG. Every new create_tasks call must "
+        "use a fresh idempotencyKey; retrying the same tool call must reuse the exact same key."
     ),
 )
 
@@ -67,6 +68,17 @@ async def get_task_status_snapshot(
 @master_agent_mcp.tool()
 async def create_tasks(
     sourceTaskId: Annotated[str, Field(description="Current task id. New tasks are appended after this task.")],
+    idempotencyKey: Annotated[
+        str,
+        Field(
+            description=(
+                "A stable unique key for this create_tasks call. Generate a new key for new work, "
+                "but keep it unchanged when retrying the same call."
+            ),
+            min_length=1,
+            max_length=128,
+        ),
+    ],
     tasks: Annotated[
         list[AppendTask],
         Field(
@@ -80,4 +92,4 @@ async def create_tasks(
     userId: Annotated[str, Field(description="Current user id from Invocation Context.")] = "anonymous",
 ) -> CreateTasksResult:
     """Append concise new task nodes after sourceTaskId without modifying existing DAG nodes or edges."""
-    return await task_status_client.create_tasks(sourceTaskId, tasks, userId)
+    return await task_status_client.create_tasks(sourceTaskId, tasks, idempotencyKey, userId)

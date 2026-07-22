@@ -8,6 +8,8 @@ import com.agentcrossing.platform.domain.queue.QuestHub;
 import com.agentcrossing.platform.domain.session.AgentSession;
 import com.agentcrossing.platform.domain.session.AgentSessionRepository;
 import com.agentcrossing.platform.domain.task.Task;
+import com.agentcrossing.platform.domain.task.TaskCreation;
+import com.agentcrossing.platform.domain.task.TaskCreationRepository;
 import com.agentcrossing.platform.domain.task.TaskDependency;
 import com.agentcrossing.platform.domain.task.TaskDependencyRepository;
 import com.agentcrossing.platform.domain.task.TaskRepository;
@@ -15,6 +17,9 @@ import com.agentcrossing.platform.domain.task.TaskSource;
 import com.agentcrossing.platform.domain.task.TaskStatus;
 import com.agentcrossing.platform.domain.user.UserRepository;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,11 +40,14 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public class QuestParserService {
     public static final String MASTER_AGENT_ID = "masteragent";
     public static final String MASTER_AGENT_PROVIDER = "claudecode";
+    private static final String SELF_ORCHESTRATION_CONTRACT_START = "[Self-Orchestration Contract]";
+    private static final String SELF_ORCHESTRATION_CONTRACT_END = "[/Self-Orchestration Contract]";
     private static final Logger log = LoggerFactory.getLogger(QuestParserService.class);
 
     private final QuestParserClient parserClient;
     private final AgentRegistry agentRegistry;
     private final TaskRepository taskRepository;
+    private final TaskCreationRepository taskCreationRepository;
     private final TaskDependencyRepository taskDependencyRepository;
     private final QuestHub questHub;
     private final LoopGuardService loopGuardService;
@@ -54,6 +62,7 @@ public class QuestParserService {
             QuestParserClient parserClient,
             AgentRegistry agentRegistry,
             TaskRepository taskRepository,
+            TaskCreationRepository taskCreationRepository,
             TaskDependencyRepository taskDependencyRepository,
             QuestHub questHub,
             LoopGuardService loopGuardService,
@@ -64,6 +73,7 @@ public class QuestParserService {
         this.parserClient = parserClient;
         this.agentRegistry = agentRegistry;
         this.taskRepository = taskRepository;
+        this.taskCreationRepository = taskCreationRepository;
         this.taskDependencyRepository = taskDependencyRepository;
         this.questHub = questHub;
         this.loopGuardService = loopGuardService;
@@ -72,6 +82,32 @@ public class QuestParserService {
         this.userRepository = userRepository;
         this.agentSessionRepository = agentSessionRepository;
         this.dagValidator = new DagValidator();
+    }
+
+    /** Compatibility constructor for focused tests without a Spring-managed idempotency repository. */
+    public QuestParserService(
+            QuestParserClient parserClient,
+            AgentRegistry agentRegistry,
+            TaskRepository taskRepository,
+            TaskDependencyRepository taskDependencyRepository,
+            QuestHub questHub,
+            LoopGuardService loopGuardService,
+            TaskDispatchSignal taskDispatchSignal,
+            TaskEventService taskEventService,
+            UserRepository userRepository,
+            AgentSessionRepository agentSessionRepository) {
+        this(
+                parserClient,
+                agentRegistry,
+                taskRepository,
+                new com.agentcrossing.platform.domain.task.InMemoryTaskCreationRepository(),
+                taskDependencyRepository,
+                questHub,
+                loopGuardService,
+                taskDispatchSignal,
+                taskEventService,
+                userRepository,
+                agentSessionRepository);
     }
 
     public QuestParserService(
@@ -87,6 +123,7 @@ public class QuestParserService {
                 parserClient,
                 agentRegistry,
                 taskRepository,
+                new com.agentcrossing.platform.domain.task.InMemoryTaskCreationRepository(),
                 taskDependencyRepository,
                 questHub,
                 loopGuardService,
@@ -107,6 +144,7 @@ public class QuestParserService {
                 parserClient,
                 agentRegistry,
                 taskRepository,
+                new com.agentcrossing.platform.domain.task.InMemoryTaskCreationRepository(),
                 taskDependencyRepository,
                 questHub,
                 loopGuardService,
@@ -127,15 +165,31 @@ public class QuestParserService {
     }
 
     public UserInputParseResult parseUserInput(String userId, String threadId, String traceId, String input) {
-        String providerSessionId = findMasterAgentSessionId(userId, threadId, traceId);
+        return parseUserInput(userId, threadId, traceId, input, null);
+    }
+
+    public UserInputParseResult parseUserInput(
+            String userId,
+            String threadId,
+            String traceId,
+            String input,
+            ThreadExecutionSummary threadExecutionSummary) {
+        AgentSession providerSession = findMasterAgentSession(userId, threadId);
         UserInputParseResult result = parserClient.parseUserInput(
                 userId,
                 threadId,
                 traceId,
                 input,
-                providerSessionId,
-                agentRegistry.findAll());
-        rememberMasterAgentSession(userId, threadId, traceId, result.providerSessionId());
+                providerSession == null ? null : providerSession.providerSessionId(),
+                providerSession == null ? null : providerSession.promptVersion(),
+                agentRegistry.findAll(),
+                threadExecutionSummary);
+        rememberMasterAgentSession(
+                userId,
+                threadId,
+                traceId,
+                result.providerSessionId(),
+                result.promptVersion());
         return result;
     }
 
@@ -162,17 +216,46 @@ public class QuestParserService {
 
     @Transactional
     public List<Task> appendAgentTasks(Task sourceTask, List<ParsedTask> parsedTasks) {
+        return appendAgentTasks(sourceTask, parsedTasks, legacyIdempotencyKey(sourceTask, parsedTasks));
+    }
+
+    /**
+     * Appends tasks exactly once per {@code sourceTaskId + clientTaskId}.
+     *
+     * <p>The caller-provided task ids are client ids, not global primary keys. Persisting this
+     * mapping lets a lost MCP response be retried safely and makes concurrent snapshot/create
+     * calls converge on the same task.
+     */
+    @Transactional
+    public List<Task> appendAgentTasks(Task sourceTask, List<ParsedTask> parsedTasks, String idempotencyKey) {
         List<ParsedTask> appendTasks = validateAppendPlan(sourceTask, parsedTasks);
+        if (appendTasks.isEmpty()) {
+            return List.of();
+        }
+        String normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey, sourceTask, appendTasks);
+        Map<String, String> taskIdsByClientTaskId = new LinkedHashMap<>();
+        for (ParsedTask appendTask : appendTasks) {
+            taskIdsByClientTaskId.put(appendTask.taskId(), generatedAppendTaskId(sourceTask.taskId(), appendTask.taskId()));
+        }
+
         List<Task> accepted = new ArrayList<>();
-        List<ParsedTask> acceptedPlans = new ArrayList<>();
+        List<Task> newlyCreated = new ArrayList<>();
+        List<ParsedTask> newlyCreatedPlans = new ArrayList<>();
         for (ParsedTask parsedTask : appendTasks) {
             // agent 输出产生的是派生任务，必须仍然挂在来源任务的 trace 上。
             if (!agentRegistry.exists(parsedTask.agentId())) {
                 continue;
             }
+            String clientTaskId = parsedTask.taskId();
+            String taskId = taskIdsByClientTaskId.get(clientTaskId);
+            ParsedTask resolvedPlan = new ParsedTask(
+                    taskId,
+                    parsedTask.agentId(),
+                    parsedTask.context(),
+                    resolvedAppendDependencies(parsedTask.dependsOn(), taskIdsByClientTaskId));
             Task task = toTask(
                     sourceTask.userId(),
-                    parsedTask,
+                    resolvedPlan,
                     sourceTask.traceId(),
                     sourceTask.taskId(),
                     TaskSource.AGENT,
@@ -180,13 +263,32 @@ public class QuestParserService {
             if (!loopGuardService.allows(task)) {
                 continue;
             }
-            // Agent 输出生成的新任务统一进入 questHub，由 DAG 依赖判断是否就绪。
-            taskRepository.save(task);
-            accepted.add(task);
-            acceptedPlans.add(parsedTask);
+            TaskCreation requestedCreation = new TaskCreation(
+                    sourceTask.taskId(),
+                    clientTaskId,
+                    taskId,
+                    sourceTask.userId(),
+                    sourceTask.traceId(),
+                    normalizedIdempotencyKey,
+                    Instant.now());
+            if (taskCreationRepository.saveIfAbsent(requestedCreation)) {
+                // Agent 输出生成的新任务统一进入 questHub，由 DAG 依赖判断是否就绪。
+                taskRepository.save(task);
+                accepted.add(task);
+                newlyCreated.add(task);
+                newlyCreatedPlans.add(resolvedPlan);
+                continue;
+            }
+            TaskCreation existingCreation = taskCreationRepository
+                    .findBySourceTaskIdAndClientTaskId(sourceTask.taskId(), clientTaskId)
+                    .orElseThrow(() -> new IllegalStateException("Task creation mapping disappeared: " + clientTaskId));
+            Task existingTask = taskRepository.findByTaskId(existingCreation.taskId())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Task creation mapping points to a missing task: " + existingCreation.taskId()));
+            accepted.add(existingTask);
         }
-        saveDependencies(acceptedPlans, accepted);
-        enqueueAfterCommit(accepted);
+        saveDependencies(newlyCreatedPlans, newlyCreated);
+        enqueueAfterCommit(newlyCreated);
         return accepted;
     }
 
@@ -242,18 +344,26 @@ public class QuestParserService {
         }
     }
 
-    private String findMasterAgentSessionId(String userId, String threadId, String traceId) {
+    private AgentSession findMasterAgentSession(String userId, String threadId) {
         if (agentSessionRepository == null) {
             return null;
         }
         return agentSessionRepository
                 .findByThreadId(userId, threadId, MASTER_AGENT_ID, MASTER_AGENT_PROVIDER)
-                .map(AgentSession::providerSessionId)
                 .orElse(null);
     }
 
-    private void rememberMasterAgentSession(String userId, String threadId, String traceId, String providerSessionId) {
-        if (agentSessionRepository == null || providerSessionId == null || providerSessionId.isBlank()) {
+    private void rememberMasterAgentSession(
+            String userId,
+            String threadId,
+            String traceId,
+            String providerSessionId,
+            String promptVersion) {
+        if (agentSessionRepository == null
+                || providerSessionId == null
+                || providerSessionId.isBlank()
+                || promptVersion == null
+                || promptVersion.isBlank()) {
             return;
         }
         Instant now = Instant.now();
@@ -268,6 +378,7 @@ public class QuestParserService {
                 MASTER_AGENT_ID,
                 MASTER_AGENT_PROVIDER,
                 providerSessionId,
+                promptVersion,
                 createdAt,
                 now));
     }
@@ -342,11 +453,10 @@ public class QuestParserService {
             candidates.put(taskId, new ParsedTask(
                     taskId,
                     task.agentId().strip(),
-                    task.context().strip(),
+                    inheritSelfOrchestrationContract(sourceTask.context(), task.context()),
                     dependencies));
         }
 
-        candidates = remapExistingTaskIds(candidates);
         boolean changed;
         do {
             Set<String> candidateIds = Set.copyOf(candidates.keySet());
@@ -358,6 +468,46 @@ public class QuestParserService {
 
         ensureValidDag(List.copyOf(projectCandidateDependencies(candidates).values()));
         return List.copyOf(candidates.values());
+    }
+
+    /**
+     * 自组织互动的完成条件由根任务定义，后续 agent 只能追加任务，不能在接力时弱化条件。
+     * 因此平台会移除模型生成的契约副本，并始终附加来源任务中的权威版本。
+     */
+    private static String inheritSelfOrchestrationContract(String sourceContext, String childContext) {
+        String normalizedChildContext = childContext.strip();
+        String sourceContract = extractSelfOrchestrationContract(sourceContext);
+        if (sourceContract == null) {
+            return normalizedChildContext;
+        }
+        String childWithoutContract = removeSelfOrchestrationContract(normalizedChildContext);
+        if (childWithoutContract.isBlank()) {
+            return sourceContract;
+        }
+        return childWithoutContract + "\n\n" + sourceContract;
+    }
+
+    private static String extractSelfOrchestrationContract(String context) {
+        if (context == null || context.isBlank()) {
+            return null;
+        }
+        int start = context.indexOf(SELF_ORCHESTRATION_CONTRACT_START);
+        int end = context.lastIndexOf(SELF_ORCHESTRATION_CONTRACT_END);
+        if (start < 0 || end < start) {
+            return null;
+        }
+        return context.substring(start, end + SELF_ORCHESTRATION_CONTRACT_END.length()).strip();
+    }
+
+    private static String removeSelfOrchestrationContract(String context) {
+        int start = context.indexOf(SELF_ORCHESTRATION_CONTRACT_START);
+        int end = context.lastIndexOf(SELF_ORCHESTRATION_CONTRACT_END);
+        if (start < 0 || end < start) {
+            return context;
+        }
+        return (context.substring(0, start)
+                        + context.substring(end + SELF_ORCHESTRATION_CONTRACT_END.length()))
+                .strip();
     }
 
     private Map<String, ParsedTask> remapExistingTaskIds(Map<String, ParsedTask> candidates) {
@@ -383,6 +533,39 @@ public class QuestParserService {
             remappedCandidates.put(taskId, new ParsedTask(taskId, task.agentId(), task.context(), dependsOn));
         }
         return remappedCandidates;
+    }
+
+    private static List<String> resolvedAppendDependencies(
+            List<String> dependencies, Map<String, String> taskIdsByClientTaskId) {
+        return dependencies.stream()
+                .map(parentTaskId -> taskIdsByClientTaskId.getOrDefault(parentTaskId, parentTaskId))
+                .toList();
+    }
+
+    private static String normalizeIdempotencyKey(
+            String idempotencyKey, Task sourceTask, List<ParsedTask> appendTasks) {
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            return idempotencyKey.strip();
+        }
+        return "legacy-" + sha256(sourceTask.taskId() + "\u0000"
+                + appendTasks.stream().map(ParsedTask::taskId).sorted().collect(java.util.stream.Collectors.joining("\u0000")));
+    }
+
+    private static String legacyIdempotencyKey(Task sourceTask, List<ParsedTask> parsedTasks) {
+        return normalizeIdempotencyKey(null, sourceTask, parsedTasks == null ? List.of() : parsedTasks);
+    }
+
+    private static String generatedAppendTaskId(String sourceTaskId, String clientTaskId) {
+        return "agent-task-" + sha256(sourceTaskId + "\u0000" + clientTaskId);
+    }
+
+    private static String sha256(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
     }
 
     private String allocateTaskId(String baseTaskId, Set<String> reservedIds) {

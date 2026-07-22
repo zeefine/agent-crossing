@@ -10,6 +10,7 @@ public record AgentSession(
         String agentId,
         String provider,
         String providerSessionId,
+        String promptVersion,
         Instant createdAt,
         Instant updatedAt) {
     public AgentSession {
@@ -19,6 +20,7 @@ public record AgentSession(
         Objects.requireNonNull(agentId, "agentId must not be null");
         Objects.requireNonNull(provider, "provider must not be null");
         Objects.requireNonNull(providerSessionId, "providerSessionId must not be null");
+        Objects.requireNonNull(promptVersion, "promptVersion must not be null");
         Objects.requireNonNull(createdAt, "createdAt must not be null");
         Objects.requireNonNull(updatedAt, "updatedAt must not be null");
         if (userId.isBlank()) {
@@ -38,6 +40,9 @@ public record AgentSession(
         }
         if (providerSessionId.isBlank()) {
             throw new IllegalArgumentException("providerSessionId must not be blank");
+        }
+        if (promptVersion.isBlank()) {
+            throw new IllegalArgumentException("promptVersion must not be blank");
         }
     }
 

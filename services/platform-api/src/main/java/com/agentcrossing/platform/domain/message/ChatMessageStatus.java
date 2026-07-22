@@ -4,7 +4,8 @@ public enum ChatMessageStatus {
     CREATED("created"),
     STREAMING("streaming"),
     COMPLETED("completed"),
-    FAILED("failed");
+    FAILED("failed"),
+    CANCELED("canceled");
 
     private final String wireValue;
 
