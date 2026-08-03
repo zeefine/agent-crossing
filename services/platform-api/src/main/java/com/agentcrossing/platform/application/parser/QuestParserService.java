@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +44,10 @@ public class QuestParserService {
     public static final String MASTER_AGENT_PROVIDER = "claudecode";
     private static final String SELF_ORCHESTRATION_CONTRACT_START = "[Self-Orchestration Contract]";
     private static final String SELF_ORCHESTRATION_CONTRACT_END = "[/Self-Orchestration Contract]";
+    private static final Pattern LEADING_AGENT_MENTION =
+            Pattern.compile("^\\s*@([A-Za-z0-9_-]+)([\\s\\S]*)$");
+    private static final Pattern AGENT_MENTION = Pattern.compile("@[A-Za-z0-9_-]+");
+    private static final Pattern LEADING_CONTEXT_SEPARATOR = Pattern.compile("^[\\s,，:：;；]+");
     private static final Logger log = LoggerFactory.getLogger(QuestParserService.class);
 
     private final QuestParserClient parserClient;
@@ -161,7 +167,11 @@ public class QuestParserService {
 
     @Transactional
     public UserInputEnqueueResult parseUserInputAndEnqueueWithResult(String userId, String input, String traceId) {
-        return enqueueParsedUserInput(userId, parserClient.parseUserInput(input, agentRegistry.findAll()), traceId);
+        UserInputParseResult directRoute = tryExplicitAgentRoute(input);
+        UserInputParseResult result = directRoute == null
+                ? parserClient.parseUserInput(input, agentRegistry.findAll())
+                : directRoute;
+        return enqueueParsedUserInput(userId, result, traceId);
     }
 
     public UserInputParseResult parseUserInput(String userId, String threadId, String traceId, String input) {
@@ -174,6 +184,17 @@ public class QuestParserService {
             String traceId,
             String input,
             ThreadExecutionSummary threadExecutionSummary) {
+        UserInputParseResult directRoute = tryExplicitAgentRoute(input);
+        if (directRoute != null) {
+            ParsedTask task = directRoute.tasks().getFirst();
+            log.info(
+                    "agent_crossing_perf event=explicit_agent_direct_route agentId={} taskId={} threadId={} traceId={}",
+                    task.agentId(),
+                    task.taskId(),
+                    threadId,
+                    traceId);
+            return directRoute;
+        }
         AgentSession providerSession = findMasterAgentSession(userId, threadId);
         UserInputParseResult result = parserClient.parseUserInput(
                 userId,
@@ -191,6 +212,47 @@ public class QuestParserService {
                 result.providerSessionId(),
                 result.promptVersion());
         return result;
+    }
+
+    /**
+     * Routes one leading, registered {@code @agentId} directly into the normal task/DAG pipeline.
+     * Inputs with another mention, an unknown agent, or no task context remain MasterAgent-owned.
+     */
+    private UserInputParseResult tryExplicitAgentRoute(String input) {
+        if (input == null || input.isBlank()) {
+            return null;
+        }
+        Matcher leadingMention = LEADING_AGENT_MENTION.matcher(input);
+        if (!leadingMention.matches()) {
+            return null;
+        }
+        String agentId = leadingMention.group(1);
+        if (!agentRegistry.exists(agentId) || countAgentMentions(input) != 1) {
+            return null;
+        }
+        String context = LEADING_CONTEXT_SEPARATOR.matcher(leadingMention.group(2)).replaceFirst("").strip();
+        if (context.isBlank()) {
+            return null;
+        }
+        return new UserInputParseResult(
+                List.of(new ParsedTask(
+                        "task-direct-" + UUID.randomUUID(),
+                        agentId,
+                        context,
+                        List.of())),
+                null);
+    }
+
+    private static int countAgentMentions(String input) {
+        Matcher matcher = AGENT_MENTION.matcher(input);
+        int count = 0;
+        while (matcher.find()) {
+            count++;
+            if (count > 1) {
+                return count;
+            }
+        }
+        return count;
     }
 
     @Transactional

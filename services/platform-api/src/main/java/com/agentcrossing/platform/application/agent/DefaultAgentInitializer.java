@@ -26,7 +26,18 @@ public class DefaultAgentInitializer implements ApplicationRunner {
                             "architecture analysis",
                             "implementation",
                             "command-line execution"),
-                    List.of("claude-code-cli", "filesystem", "shell")));
+                    List.of("claude-code-cli", "filesystem", "shell")),
+            new Agent(
+                    "codex",
+                    "Codex",
+                    "CLI coding agent for code reasoning, implementation, review, and repository analysis.",
+                    List.of(
+                            "code reasoning",
+                            "implementation",
+                            "code review",
+                            "repository analysis",
+                            "command-line execution"),
+                    List.of("codex-cli", "filesystem", "shell")));
 
     private final AgentRegistry agentRegistry;
     private final AgentCatalogProperties agentCatalogProperties;

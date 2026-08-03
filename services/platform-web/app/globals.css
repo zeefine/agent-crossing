@@ -645,6 +645,16 @@ h3 {
   background: #fff;
 }
 
+.message.from-codex .message-icon {
+  background: #edf0f4;
+  color: #4e5c70;
+}
+
+.message.from-codex .message-body {
+  border-left: 2px solid #aeb8c6;
+  background: #fff;
+}
+
 .message.from-agent .message-body {
   border-left: 2px solid var(--muted-2);
 }

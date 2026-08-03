@@ -33,6 +33,60 @@ class QuestParserServiceTests {
             new LoopGuardService(taskRepository));
 
     @Test
+    void routesSingleExplicitKnownAgentWithoutCallingMasterAgent() {
+        UserInputParseResult result = service.parseUserInput(
+                "user-1",
+                "thread-1",
+                "trace-1",
+                "  @opencode：你是谁");
+
+        assertThat(result.tasks()).singleElement().satisfies(task -> {
+            assertThat(task.taskId()).startsWith("task-direct-");
+            assertThat(task.agentId()).isEqualTo("opencode");
+            assertThat(task.context()).isEqualTo("你是谁");
+            assertThat(task.dependsOn()).isEmpty();
+        });
+        assertThat(result.directAnswer()).isNull();
+        assertThat(parserClient.parseCalls).isZero();
+    }
+
+    @Test
+    void directExplicitAgentRouteStillUsesTheNormalDagEnqueuePath() {
+        UserInputEnqueueResult result = service.parseUserInputAndEnqueueWithResult(
+                "user-1",
+                "@opencode请直接回答",
+                "trace-direct");
+
+        assertThat(result.tasks()).singleElement().satisfies(task -> {
+            assertThat(task.agentId()).isEqualTo("opencode");
+            assertThat(task.context()).isEqualTo("请直接回答");
+            assertThat(task.status()).isEqualTo(TaskStatus.QUEUED);
+            assertThat(task.source()).isEqualTo(TaskSource.USER);
+            assertThat(task.depth()).isZero();
+        });
+        assertThat(questHub.snapshot()).containsExactly(result.tasks().getFirst().taskId());
+        assertThat(taskDependencyRepository.findParentTaskIds(result.tasks().getFirst().taskId())).isEmpty();
+        assertThat(parserClient.parseCalls).isZero();
+    }
+
+    @Test
+    void leavesMultipleUnknownAndEmptyExplicitMentionsForMasterAgent() {
+        parserClient.userTasks = List.of(new ParsedTask("task-master", "opencode", "planned", List.of()));
+
+        assertThat(service.parseUserInput("user-1", "thread-1", "trace-1", "@opencode 请 @claudecode 回答")
+                        .tasks())
+                .extracting(ParsedTask::taskId)
+                .containsExactly("task-master");
+        assertThat(service.parseUserInput("user-1", "thread-1", "trace-1", "@missing 你是谁").tasks())
+                .extracting(ParsedTask::taskId)
+                .containsExactly("task-master");
+        assertThat(service.parseUserInput("user-1", "thread-1", "trace-1", "@opencode").tasks())
+                .extracting(ParsedTask::taskId)
+                .containsExactly("task-master");
+        assertThat(parserClient.parseCalls).isEqualTo(3);
+    }
+
+    @Test
     void parsesUserInputCompletesTaskMetadataAndEnqueuesKnownAgents() {
         parserClient.userTasks = List.of(
                 new ParsedTask("task-1", "opencode", "do work", List.of()),
@@ -219,9 +273,11 @@ class QuestParserServiceTests {
 
     private static final class FakeQuestParserClient implements QuestParserClient {
         private List<ParsedTask> userTasks = new ArrayList<>();
+        private int parseCalls;
 
         @Override
         public UserInputParseResult parseUserInput(String input, List<Agent> availableAgents) {
+            parseCalls++;
             return new UserInputParseResult(userTasks, null);
         }
     }

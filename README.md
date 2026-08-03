@@ -1,6 +1,6 @@
 # Agent Crossing: Multi-Agent CLI Collaboration Platform
 
-> **A local-first orchestration platform for CLI agents** - Route user intent through a hidden MasterAgent, decompose work into task DAGs, execute specialized CLI agents such as OpenCode and Claude Code, and stream results back to a WebSocket-powered chat UI.
+> **A local-first orchestration platform for CLI agents** - Route user intent through a hidden MasterAgent, decompose work into task DAGs, execute specialized CLI agents such as OpenCode, Claude Code, and Codex, and stream results back to a WebSocket-powered chat UI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Java 21](https://img.shields.io/badge/Java-21-007396.svg)](services/platform-api/pom.xml)
@@ -20,7 +20,7 @@ The core workflow is:
 
 1. A user enters a complex question or task in the web interface.
 2. The internal **MasterAgent** analyzes intent, decides whether to answer directly or decompose the request, and emits a task DAG.
-3. Business agents such as **OpenCode** and **ClaudeCode** execute ready DAG nodes, share progress through platform state, and return intermediate and final results to the user.
+3. Business agents such as **OpenCode**, **ClaudeCode**, and **Codex** execute ready DAG nodes, share progress through platform state, and return intermediate and final results to the user.
 
 The project value is in the coordination layer: Java owns durable state, dependency-aware scheduling, and realtime delivery; Python isolates CLI/provider adaptation; the frontend makes the hidden multi-agent execution understandable through chat and DAG views.
 
@@ -32,7 +32,7 @@ The project value is in the coordination layer: Java owns durable state, depende
 - **Dependency-aware scheduling**: the router evaluates `task_dependency`, task status, and per-user agent availability before reserving work for execution.
 - **Dynamic serial and parallel execution**: DAG edges model ordered work, while independent ready nodes can be dispatched to different agents concurrently.
 - **Global execution context**: agents receive incremental conversation context and task-state snapshots so each invocation can understand the wider collaboration state.
-- **CLI provider abstraction**: the Python runtime adapts OpenCode and ClaudeCode subprocess behavior into a common `AgentMessage` contract, including session reuse and output normalization.
+- **CLI provider abstraction**: the Python runtime adapts OpenCode, ClaudeCode, and Codex subprocess behavior into a common `AgentMessage` contract, including session reuse and output normalization.
 - **Realtime operator surface**: WebSocket events keep the chat timeline, agent status, task status, and DAG visualization synchronized with backend execution.
 
 ---
@@ -41,7 +41,7 @@ The project value is in the coordination layer: Java owns durable state, depende
 
 Business agent cards are initialized by the platform and can be expanded as new CLI providers are added.
 
-Currently adapted CLI providers: **ClaudeCode CLI** and **OpenCode CLI**.
+Currently adapted CLI providers: **ClaudeCode CLI**, **OpenCode CLI**, and **Codex CLI**.
 
 ---
 
@@ -64,6 +64,7 @@ FastAPI agent-runtime
   ├─ MasterAgent planner
   ├─ OpenCode provider
   ├─ ClaudeCode provider
+  ├─ Codex provider
   └─ FastMCP tools
        ↓ subprocess / MCP
 CLI agents and model providers
@@ -74,7 +75,7 @@ CLI agents and model providers
 | Path | Stack | Responsibility |
 | --- | --- | --- |
 | `services/platform-api` | Spring Boot, MyBatis, WebSocket | Source of truth for users, threads, tasks, invocations, sessions, routing, and realtime events. |
-| `services/agent-runtime` | FastAPI, Pydantic, FastMCP | Runtime adapter layer for MasterAgent, OpenCode, ClaudeCode, provider stdout/JSON parsing, and MCP tools. |
+| `services/agent-runtime` | FastAPI, Pydantic, FastMCP | Runtime adapter layer for MasterAgent, OpenCode, ClaudeCode, Codex, provider stdout/JSON parsing, and MCP tools. |
 | `services/platform-web` | Next.js, React, TypeScript | Chat workspace, agent status, WebSocket updates, and task DAG visualization. |
 | `contracts` | JSON Schema | Cross-language request, response, task, invocation, and realtime event contracts. |
 | `scripts` | Bash | Local dev startup, shutdown, test, and lint helpers. |
@@ -95,6 +96,7 @@ CLI agents and model providers
 - Installed and authenticated CLI agents:
   - `opencode`
   - `claude`
+  - `codex`
 
 ### 2. Configure environment
 
@@ -195,6 +197,10 @@ OpenCode is invoked through `opencode run <prompt>` for fresh sessions and `open
 
 ClaudeCode is invoked with `claude -p <prompt> --output-format stream-json --verbose`. When a provider session exists, the runtime resumes it with `--resume <sessionId>`.
 
+### Codex
+
+Codex is invoked with `codex exec --json` for a fresh thread and `codex exec resume <sessionId> --json` for a reused provider session. Prompts are sent over stdin, `thread.started.thread_id` is persisted per user/thread/agent, and only completed `agent_message` events become user-visible output. User-level Codex configuration is ignored by default so the process only receives the explicitly configured Agent Crossing MCP server; authentication remains available through `CODEX_HOME`.
+
 ### MCP
 
 The runtime exposes MCP tools used by MasterAgent and business agents, including task planning, direct answers, task status snapshots, and append-only task creation. CLI MCP configuration is environment-driven so local users can manage their own provider setup.
@@ -267,7 +273,7 @@ The same application layer can also run with in-memory repositories for lightwei
 
 - Production-grade WebSocket delivery with async send isolation.
 - Stronger observability around CLI execution latency and provider recovery.
-- More business agents beyond OpenCode and ClaudeCode.
+- More business agents beyond OpenCode, ClaudeCode, and Codex.
 - More compact context summarization for long-running threads.
 - Multi-user authentication beyond the current lightweight local user resolver.
 

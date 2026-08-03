@@ -19,6 +19,7 @@ from agent_runtime.contracts.models import (
 )
 from agent_runtime.main import create_app
 from agent_runtime.providers.claudecode import ClaudeCodeProvider
+from agent_runtime.providers.codex import CodexProvider
 from agent_runtime.providers.opencode import OpenCodeProvider
 from agent_runtime.providers.registry import ProviderRegistry
 from agent_runtime.prompt_config import load_prompt_config
@@ -124,11 +125,12 @@ def test_runtime_service_cancels_active_execution() -> None:
     asyncio.run(scenario())
 
 
-def test_default_provider_registry_contains_claudecode() -> None:
+def test_default_provider_registry_contains_business_agents() -> None:
     registry = ProviderRegistry()
 
     assert registry.get("opencode") is not None
     assert registry.get("claudecode") is not None
+    assert registry.get("codex") is not None
 
 
 def test_runtime_api_returns_agent_messages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -437,6 +439,145 @@ def test_claudecode_provider_marks_nonzero_exit_as_error_with_stderr_diagnostics
     assert messages[-1].raw["diagnostics"]["stderrTail"] == "fatal diagnostic\n"
 
 
+def test_codex_provider_builds_json_command_and_parses_completed_agent_message(tmp_path: Path) -> None:
+    script = tmp_path / "fake_codex.py"
+    command_log = tmp_path / "codex-command.json"
+    prompt_log = tmp_path / "codex-prompt.txt"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                f"pathlib.Path({str(command_log)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')",
+                f"pathlib.Path({str(prompt_log)!r}).write_text(sys.stdin.read(), encoding='utf-8')",
+                "print(json.dumps({'type': 'thread.started', 'thread_id': 'codex-thread-1'}))",
+                "print(json.dumps({'type': 'item.started', 'item': {'type': 'command_execution', 'command': 'pwd'}}))",
+                "print(json.dumps({'type': 'item.completed', 'item': {'type': 'command_execution', 'aggregated_output': '/tmp'}}))",
+                "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Codex answer'}}))",
+                "print(json.dumps({'type': 'turn.completed'}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = CodexProvider(command=f"{sys.executable} {script}")
+    request = execution_request().model_copy(
+        update={"agent_id": "codex", "callback_base_url": None}
+    )
+
+    messages = asyncio.run(provider.execute(request))
+
+    command = json.loads(command_log.read_text(encoding="utf-8"))
+    assert command[:2] == ["exec", "--json"]
+    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert "--ignore-user-config" in command
+    assert command[-1] == "-"
+    assert any(arg.startswith("mcp_servers.agent-crossing.url=") for arg in command)
+    assert prompt_log.read_text(encoding="utf-8").startswith("[Role]")
+    assert [message.type for message in messages] == [
+        AgentMessageType.TEXT_DELTA,
+        AgentMessageType.DONE,
+    ]
+    assert messages[0].content == "Codex answer"
+    assert messages[-1].raw["providerSessionId"] == "codex-thread-1"
+    assert messages[-1].raw["diagnostics"]["nonChatEventCount"] == 2
+
+
+def test_codex_provider_resumes_provider_session_and_omits_static_prompt(tmp_path: Path) -> None:
+    script = tmp_path / "fake_codex_resume.py"
+    command_log = tmp_path / "codex-resume-command.json"
+    prompt_log = tmp_path / "codex-resume-prompt.txt"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                f"pathlib.Path({str(command_log)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')",
+                f"pathlib.Path({str(prompt_log)!r}).write_text(sys.stdin.read(), encoding='utf-8')",
+                "print(json.dumps({'type': 'thread.started', 'thread_id': 'codex-thread-existing'}))",
+                "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'continued'}}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    request = execution_request().model_copy(
+        update={
+            "agent_id": "codex",
+            "callback_base_url": None,
+            "provider_session_id": "codex-thread-existing",
+            "provider_prompt_version": load_prompt_config().business_agent_prompt_version("codex"),
+        }
+    )
+    provider = CodexProvider(command=f"{sys.executable} {script}")
+
+    messages = asyncio.run(provider.execute(request))
+
+    command = json.loads(command_log.read_text(encoding="utf-8"))
+    assert command[:3] == ["exec", "resume", "codex-thread-existing"]
+    assert "--sandbox" not in command
+    assert "--ignore-user-config" in command
+    assert command[-1] == "-"
+    assert prompt_log.read_text(encoding="utf-8").startswith("[Invocation Context]")
+    assert messages[0].content == "continued"
+    assert messages[-1].raw["providerSessionId"] == "codex-thread-existing"
+
+
+def test_codex_provider_filters_tool_events_and_dedupes_assistant_snapshots() -> None:
+    provider = CodexProvider(
+        command=(
+            f"{sys.executable} -c \"import json, sys; sys.stdin.read(); "
+            "print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','server':'agent-crossing','tool':'create_tasks'}})); "
+            "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'hello'}})); "
+            "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'hello world'}}))\""
+        )
+    )
+    request = execution_request().model_copy(
+        update={"agent_id": "codex", "callback_base_url": None}
+    )
+
+    messages = asyncio.run(provider.execute(request))
+
+    text_messages = [message for message in messages if message.type == AgentMessageType.TEXT_DELTA]
+    assert [message.content for message in text_messages] == ["hello", " world"]
+    assert messages[-1].raw["diagnostics"]["nonChatEventCount"] == 1
+
+
+def test_codex_provider_parses_structured_error_without_silent_completion() -> None:
+    provider = CodexProvider(
+        command=(
+            f"{sys.executable} -c \"import json, sys; sys.stdin.read(); "
+            "print(json.dumps({'type':'error','message':'codex failed'}))\""
+        )
+    )
+    request = execution_request().model_copy(
+        update={"agent_id": "codex", "callback_base_url": None}
+    )
+
+    messages = asyncio.run(provider.execute(request))
+
+    assert [message.type for message in messages] == [AgentMessageType.ERROR, AgentMessageType.DONE]
+    assert messages[0].content == "codex failed"
+
+
+def test_codex_provider_marks_nonzero_exit_as_error_with_stderr_diagnostics() -> None:
+    provider = CodexProvider(
+        command=(
+            f"{sys.executable} -c \"import sys; sys.stdin.read(); "
+            "sys.stderr.write('fatal diagnostic\\\\n'); sys.exit(7)\""
+        )
+    )
+    request = execution_request().model_copy(
+        update={"agent_id": "codex", "callback_base_url": None}
+    )
+
+    messages = asyncio.run(provider.execute(request))
+
+    assert [message.type for message in messages] == [AgentMessageType.ERROR, AgentMessageType.DONE]
+    assert messages[0].content == "Codex exited with code 7"
+    assert messages[-1].raw["diagnostics"]["stderrTail"] == "fatal diagnostic\n"
+
+
 def test_opencode_provider_builds_plain_command_and_parses_stdout() -> None:
     provider = OpenCodeProvider(
         command=(
@@ -710,10 +851,14 @@ def test_opencode_provider_reads_static_prompt_from_config(
 
 @pytest.mark.parametrize(
     ("provider_class", "agent_id"),
-    ((OpenCodeProvider, "opencode"), (ClaudeCodeProvider, "claudecode")),
+    (
+        (OpenCodeProvider, "opencode"),
+        (ClaudeCodeProvider, "claudecode"),
+        (CodexProvider, "codex"),
+    ),
 )
 def test_business_agent_reused_session_omits_static_prompt(
-    provider_class: type[OpenCodeProvider] | type[ClaudeCodeProvider],
+    provider_class: type[OpenCodeProvider] | type[ClaudeCodeProvider] | type[CodexProvider],
     agent_id: str,
 ) -> None:
     request = execution_request().model_copy(
@@ -751,23 +896,30 @@ def test_business_agent_prompt_limits_multi_turn_collaboration_to_next_hop() -> 
     claudecode_prompt = ClaudeCodeProvider._build_prompt(
         execution_request().model_copy(update={"agent_id": "claudecode"})
     )
+    codex_prompt = CodexProvider._build_prompt(
+        execution_request().model_copy(update={"agent_id": "codex"})
+    )
 
     assert "每轮最多追加一个下一跳" in opencode_prompt
     assert "不得预生成剩余轮次" in opencode_prompt
     assert "每轮最多追加一个下一跳" in claudecode_prompt
     assert "不得预生成剩余轮次" in claudecode_prompt
+    assert "每轮最多追加一个下一跳" in codex_prompt
+    assert "不得预生成剩余轮次" in codex_prompt
 
 
 def test_business_agent_providers_share_the_same_prompt_composer() -> None:
     request = execution_request()
 
     assert OpenCodeProvider._build_prompt(request) == ClaudeCodeProvider._build_prompt(request)
+    assert OpenCodeProvider._build_prompt(request) == CodexProvider._build_prompt(request)
 
 
 def test_business_agent_prompt_removes_static_agent_roster_and_tool_examples() -> None:
     prompts = (
         OpenCodeProvider._build_prompt(execution_request()),
         ClaudeCodeProvider._build_prompt(execution_request().model_copy(update={"agent_id": "claudecode"})),
+        CodexProvider._build_prompt(execution_request().model_copy(update={"agent_id": "codex"})),
     )
 
     for prompt in prompts:
@@ -783,8 +935,11 @@ def test_business_agent_prompt_keeps_follow_up_task_context_concise() -> None:
     claudecode_prompt = ClaudeCodeProvider._build_prompt(
         execution_request().model_copy(update={"agent_id": "claudecode"})
     )
+    codex_prompt = CodexProvider._build_prompt(
+        execution_request().model_copy(update={"agent_id": "codex"})
+    )
 
-    for prompt in (opencode_prompt, claudecode_prompt):
+    for prompt in (opencode_prompt, claudecode_prompt, codex_prompt):
         assert "tasks[].context 只写可独立执行的简短指令" in prompt
         assert "不复制对话历史、长原文、工具结果或 JSON" in prompt
         assert "平台会增量注入用户和其他 agent 的新消息" in prompt

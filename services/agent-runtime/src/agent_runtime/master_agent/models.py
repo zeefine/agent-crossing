@@ -7,7 +7,10 @@ class MasterAgentModel(BaseModel):
 
 class PlannedTask(MasterAgentModel):
     task_id: str = Field(alias="taskId", description="Unique task id, usually starting with task-.")
-    agent_id: str = Field(alias="agentId", description="Target business agent id, for example opencode or claudecode.")
+    agent_id: str = Field(
+        alias="agentId",
+        description="Target business agent id, for example opencode, claudecode, or codex.",
+    )
     context: str = Field(
         description=(
             "Concise instruction for the target agent. Do not copy full conversation history, "

@@ -16,7 +16,7 @@ class AgentRegistryTests {
     }
 
     @Test
-    void initializerRegistersOpenCodeByDefault() {
+    void initializerRegistersDefaultBusinessAgents() {
         AgentRegistry registry = new AgentRegistry(new InMemoryAgentCatalog());
 
         new DefaultAgentInitializer(registry, new AgentCatalogProperties()).run(null);
@@ -28,6 +28,19 @@ class AgentRegistryTests {
                         "CLI coding agent for implementation, reasoning, and codebase operations.",
                         List.of("code reasoning", "implementation", "command-line execution", "project analysis"),
                         List.of("opencode-cli", "filesystem", "shell")));
+        assertThat(registry.findByAgentId("claudecode")).isPresent();
+        assertThat(registry.findByAgentId("codex"))
+                .contains(new Agent(
+                        "codex",
+                        "Codex",
+                        "CLI coding agent for code reasoning, implementation, review, and repository analysis.",
+                        List.of(
+                                "code reasoning",
+                                "implementation",
+                                "code review",
+                                "repository analysis",
+                                "command-line execution"),
+                        List.of("codex-cli", "filesystem", "shell")));
         assertThat(registry.exists("unknown-agent")).isFalse();
     }
 

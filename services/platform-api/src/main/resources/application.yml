@@ -61,3 +61,16 @@ agent-crossing:
         - claude-code-cli
         - filesystem
         - shell
+    - agent-id: codex
+      display-name: Codex
+      role: CLI coding agent for code reasoning, implementation, review, and repository analysis.
+      capabilities:
+        - code reasoning
+        - implementation
+        - code review
+        - repository analysis
+        - command-line execution
+      tools:
+        - codex-cli
+        - filesystem
+        - shell

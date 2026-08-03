@@ -1,6 +1,7 @@
 from agent_runtime.providers.base import BaseProvider
 from agent_runtime.callback.dispatcher import CallbackDispatcher
 from agent_runtime.providers.claudecode import ClaudeCodeProvider
+from agent_runtime.providers.codex import CodexProvider
 from agent_runtime.providers.opencode import OpenCodeProvider
 
 
@@ -11,6 +12,7 @@ class ProviderRegistry:
             [
                 OpenCodeProvider(callback_dispatcher=self._callback_dispatcher),
                 ClaudeCodeProvider(callback_dispatcher=self._callback_dispatcher),
+                CodexProvider(callback_dispatcher=self._callback_dispatcher),
             ]
             if providers is None
             else providers
