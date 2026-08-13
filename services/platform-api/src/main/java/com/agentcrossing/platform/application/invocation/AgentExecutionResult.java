@@ -8,7 +8,8 @@ public record AgentExecutionResult(
         String finalText,
         boolean streamCompleted,
         Long lastSequence,
-        String promptVersion) {
+        String promptVersion,
+        AgentExecutionUsage usage) {
     public AgentExecutionResult {
         messages = messages == null ? List.of() : List.copyOf(messages);
         if (promptVersion == null || promptVersion.isBlank()) {
@@ -17,7 +18,7 @@ public record AgentExecutionResult(
     }
 
     public AgentExecutionResult(List<AgentMessage> messages) {
-        this(messages, null, false, null, null);
+        this(messages, null, false, null, null, null);
     }
 
     public AgentExecutionResult(
@@ -25,7 +26,16 @@ public record AgentExecutionResult(
             String finalText,
             boolean streamCompleted,
             Long lastSequence) {
-        this(messages, finalText, streamCompleted, lastSequence, null);
+        this(messages, finalText, streamCompleted, lastSequence, null, null);
+    }
+
+    public AgentExecutionResult(
+            List<AgentMessage> messages,
+            String finalText,
+            boolean streamCompleted,
+            Long lastSequence,
+            String promptVersion) {
+        this(messages, finalText, streamCompleted, lastSequence, promptVersion, null);
     }
 
     public boolean hasError() {

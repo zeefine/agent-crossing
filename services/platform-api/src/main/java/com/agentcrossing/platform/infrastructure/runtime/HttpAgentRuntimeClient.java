@@ -2,6 +2,7 @@ package com.agentcrossing.platform.infrastructure.runtime;
 
 import com.agentcrossing.platform.application.invocation.AgentExecutionRequest;
 import com.agentcrossing.platform.application.invocation.AgentExecutionResult;
+import com.agentcrossing.platform.application.invocation.AgentExecutionUsage;
 import com.agentcrossing.platform.application.invocation.AgentMessage;
 import com.agentcrossing.platform.application.invocation.AgentMessageType;
 import java.time.Instant;
@@ -49,7 +50,8 @@ public class HttpAgentRuntimeClient implements com.agentcrossing.platform.applic
                         response.finalText(),
                         response.streamCompleted(),
                         response.lastSequence(),
-                        response.promptVersion());
+                        response.promptVersion(),
+                        response.usage());
     }
 
     @Override
@@ -70,7 +72,8 @@ public class HttpAgentRuntimeClient implements com.agentcrossing.platform.applic
             String finalText,
             boolean streamCompleted,
             Long lastSequence,
-            String promptVersion) {
+            String promptVersion,
+            AgentExecutionUsage usage) {
         List<AgentMessage> toAgentMessages() {
             return messages == null ? List.of() : messages.stream().map(AgentMessageDto::toAgentMessage).toList();
         }

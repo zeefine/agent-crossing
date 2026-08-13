@@ -17,6 +17,7 @@ from agent_runtime.contracts.models import AgentExecutionRequest, AgentMessage, 
 from agent_runtime.prompt_config import load_prompt_config
 from agent_runtime.prompt_session import annotate_prompt_version, prepare_execution_request
 from agent_runtime.providers.base import BaseProvider
+from agent_runtime.providers.usage import normalize_cli_usage
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 
 
@@ -148,8 +149,17 @@ class ClaudeCodeProvider(BaseProvider):
         messages: list[AgentMessage] = []
         session_ids: list[str] = []
         diagnostics = self._empty_diagnostics()
+        usage_state: dict[str, Any] = {}
         await asyncio.gather(
-            self._read_stdout(request, process, messages, session_ids, process_started_at, first_output_state),
+            self._read_stdout(
+                request,
+                process,
+                messages,
+                session_ids,
+                usage_state,
+                process_started_at,
+                first_output_state,
+            ),
             self._read_stderr(request, process, diagnostics, process_started_at, first_output_state),
         )
         return_code = await process.wait()
@@ -183,6 +193,14 @@ class ClaudeCodeProvider(BaseProvider):
         if session_id:
             done.raw["sessionId"] = session_id
             done.raw["providerSessionId"] = session_id
+        usage = normalize_cli_usage(
+            "claudecode",
+            usage_state.get("usageEvent"),
+            settings.claudecode_model,
+            session_id,
+        )
+        if usage is not None:
+            done.raw["usage"] = usage
         messages.append(done)
         return messages
 
@@ -192,6 +210,7 @@ class ClaudeCodeProvider(BaseProvider):
         process: asyncio.subprocess.Process,
         messages: list[AgentMessage],
         session_ids: list[str],
+        usage_state: dict[str, Any],
         process_started_at: float,
         first_output_state: dict[str, bool],
     ) -> None:
@@ -201,6 +220,13 @@ class ClaudeCodeProvider(BaseProvider):
         while line := await process.stdout.readline():
             self._log_first_output(request, process_started_at, first_output_state, "stdout")
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            event = self._parse_json_line(text)
+            if (
+                isinstance(event, dict)
+                and str(event.get("type") or "") == "result"
+                and isinstance(event.get("usage"), dict)
+            ):
+                usage_state["usageEvent"] = event
             for message in self._stdout_to_messages(request, text, session_ids):
                 message, emitted_assistant_text = self._dedupe_assistant_text_message(
                     message,

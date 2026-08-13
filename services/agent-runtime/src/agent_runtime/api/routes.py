@@ -8,11 +8,14 @@ from agent_runtime.contracts.models import (
     ApiResponse,
     HealthResponse,
     RuntimeCancelResponse,
+    SessionCompressionRequest,
+    SessionCompressionResponse,
     UserInputParseRequest,
     UserInputParseResponse,
 )
 from agent_runtime.parser.service import QuestParserService
 from agent_runtime.master_agent.errors import MasterAgentPlanningError
+from agent_runtime.master_agent.session_compressor import session_compressor
 from agent_runtime.runtime.service import AgentRuntimeService
 
 router = APIRouter()
@@ -53,3 +56,11 @@ async def cancel_agent_execution(invocation_id: str) -> RuntimeCancelResponse:
         invocationId=invocation_id,
         accepted=await runtime_service.cancel(invocation_id),
     )
+
+
+@router.post("/runtime/compress", response_model=SessionCompressionResponse)
+async def compress_business_session(request: SessionCompressionRequest) -> SessionCompressionResponse:
+    try:
+        return await session_compressor.compress(request)
+    except RuntimeError as exception:
+        raise HTTPException(status_code=503, detail=str(exception)) from exception

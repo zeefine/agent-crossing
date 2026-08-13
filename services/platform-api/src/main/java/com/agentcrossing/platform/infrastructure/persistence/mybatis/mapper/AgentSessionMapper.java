@@ -14,5 +14,11 @@ public interface AgentSessionMapper {
 
     void upsert(AgentSession session);
 
+    void delete(
+            @Param("userId") String userId,
+            @Param("threadId") String threadId,
+            @Param("agentId") String agentId,
+            @Param("provider") String provider);
+
     void deleteByThreadId(@Param("userId") String userId, @Param("threadId") String threadId);
 }

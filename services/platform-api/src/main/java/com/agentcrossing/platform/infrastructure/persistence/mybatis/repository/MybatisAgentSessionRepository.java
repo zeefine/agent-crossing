@@ -31,6 +31,11 @@ public class MybatisAgentSessionRepository implements AgentSessionRepository {
     }
 
     @Override
+    public void delete(String userId, String threadId, String agentId, String provider) {
+        agentSessionMapper.delete(userId, threadId, agentId, provider);
+    }
+
+    @Override
     public void deleteByThreadId(String userId, String threadId) {
         agentSessionMapper.deleteByThreadId(userId, threadId);
     }

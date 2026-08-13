@@ -14,6 +14,10 @@ class PromptConfig(BaseModel):
     business_agent_static_prompt: str = Field(default="", alias="businessAgentStaticPrompt")
     business_agent_static_prompts: dict[str, str] = Field(default_factory=dict, alias="businessAgentStaticPrompts")
     master_agent_static_prompt: str = Field(alias="masterAgentStaticPrompt")
+    master_agent_compression_prompt: str = Field(
+        default="Output only a valid schemaVersion=1 JSON cumulative session summary.",
+        alias="masterAgentCompressionPrompt",
+    )
 
     def static_prompt_for_business_agent(self, agent_id: str) -> str:
         return (
@@ -27,6 +31,9 @@ class PromptConfig(BaseModel):
 
     def master_agent_prompt_version(self) -> str:
         return _prompt_version(self.master_agent_static_prompt)
+
+    def compression_prompt_version(self) -> str:
+        return _prompt_version(self.master_agent_compression_prompt)
 
 
 def _prompt_version(prompt: str) -> str:

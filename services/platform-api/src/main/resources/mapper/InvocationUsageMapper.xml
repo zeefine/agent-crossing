@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.InvocationUsageMapper">
+    <resultMap id="InvocationUsageResultMap" type="com.agentcrossing.platform.domain.invocation.InvocationUsage">
+        <constructor>
+            <idArg column="invocation_id" javaType="java.lang.String"/>
+            <arg column="provider" javaType="java.lang.String"/>
+            <arg column="model" javaType="java.lang.String"/>
+            <arg column="provider_session_id" javaType="java.lang.String"/>
+            <arg column="total_input_tokens" javaType="java.lang.Long"/>
+            <arg column="last_request_input_tokens" javaType="java.lang.Long"/>
+            <arg column="usage_precision" javaType="com.agentcrossing.platform.domain.invocation.UsagePrecision"/>
+            <arg column="input_tokens" javaType="java.lang.Long"/>
+            <arg column="cached_input_tokens" javaType="java.lang.Long"/>
+            <arg column="cache_creation_input_tokens" javaType="java.lang.Long"/>
+            <arg column="cache_read_input_tokens" javaType="java.lang.Long"/>
+            <arg column="output_tokens" javaType="java.lang.Long"/>
+            <arg column="reasoning_output_tokens" javaType="java.lang.Long"/>
+            <arg column="context_input_tokens" javaType="long"/>
+            <arg column="raw_usage_json" javaType="java.lang.Object"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler"/>
+            <arg column="provider_cli_version" javaType="java.lang.String"/>
+            <arg column="observed_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="upsert" parameterType="com.agentcrossing.platform.domain.invocation.InvocationUsage">
+        INSERT INTO invocation_usage (
+            invocation_id, provider, model, provider_session_id,
+            total_input_tokens, last_request_input_tokens, usage_precision,
+            input_tokens, cached_input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+            output_tokens, reasoning_output_tokens, context_input_tokens,
+            raw_usage_json, provider_cli_version, observed_at
+        ) VALUES (
+            #{invocationId}, #{provider}, #{model}, #{providerSessionId},
+            #{totalInputTokens}, #{lastRequestInputTokens}, #{usagePrecision},
+            #{inputTokens}, #{cachedInputTokens}, #{cacheCreationInputTokens}, #{cacheReadInputTokens},
+            #{outputTokens}, #{reasoningOutputTokens}, #{contextInputTokens},
+            #{rawUsageJson, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler},
+            #{providerCliVersion},
+            #{observedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+        ON DUPLICATE KEY UPDATE
+            provider = VALUES(provider),
+            model = VALUES(model),
+            provider_session_id = VALUES(provider_session_id),
+            total_input_tokens = VALUES(total_input_tokens),
+            last_request_input_tokens = VALUES(last_request_input_tokens),
+            usage_precision = VALUES(usage_precision),
+            input_tokens = VALUES(input_tokens),
+            cached_input_tokens = VALUES(cached_input_tokens),
+            cache_creation_input_tokens = VALUES(cache_creation_input_tokens),
+            cache_read_input_tokens = VALUES(cache_read_input_tokens),
+            output_tokens = VALUES(output_tokens),
+            reasoning_output_tokens = VALUES(reasoning_output_tokens),
+            context_input_tokens = VALUES(context_input_tokens),
+            raw_usage_json = VALUES(raw_usage_json),
+            provider_cli_version = VALUES(provider_cli_version),
+            observed_at = VALUES(observed_at)
+    </insert>
+
+    <select id="findByInvocationId" resultMap="InvocationUsageResultMap">
+        SELECT invocation_id, provider, model, provider_session_id,
+               total_input_tokens, last_request_input_tokens, usage_precision,
+               input_tokens, cached_input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+               output_tokens, reasoning_output_tokens, context_input_tokens,
+               raw_usage_json, provider_cli_version, observed_at
+        FROM invocation_usage
+        WHERE invocation_id = #{invocationId}
+    </select>
+
+    <delete id="deleteByInvocationIds">
+        DELETE FROM invocation_usage
+        WHERE invocation_id IN
+        <foreach collection="invocationIds" item="invocationId" open="(" separator="," close=")">
+            #{invocationId}
+        </foreach>
+    </delete>
+</mapper>

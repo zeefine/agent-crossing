@@ -93,8 +93,83 @@
                   "tools": { "type": "array", "items": { "type": "string" } }
                 }
               }
+            },
+            "startupSummary": {
+              "type": ["string", "null"]
             }
           }
+        }
+      }
+    },
+    "AgentExecutionUsage": {
+      "$comment": "MODEL_SYNC(AgentExecutionUsage) — 改字段时三处同步（无 codegen）: contracts/schemas/runtime-event.schema.json ($defs/AgentExecutionUsage) | services/platform-api/src/main/java/com/agentcrossing/platform/application/invocation/AgentExecutionUsage.java | services/agent-runtime/src/agent_runtime/contracts/models.py (class AgentExecutionUsage)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "contextInputTokens", "observedAt"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "providerSessionId": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "totalInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "lastRequestInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "usagePrecision": {
+          "type": "string",
+          "enum": ["EXACT", "TURN_AGGREGATE", "ESTIMATED", "UNKNOWN"],
+          "default": "UNKNOWN"
+        },
+        "inputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "cachedInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "cacheCreationInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "cacheReadInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "reasoningOutputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "contextInputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rawUsageJson": {
+          "type": ["object", "null"]
+        },
+        "providerCliVersion": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     },
@@ -122,6 +197,16 @@
         "promptVersion": {
           "type": ["string", "null"],
           "minLength": 1
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentExecutionUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     }

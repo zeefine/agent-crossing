@@ -16,8 +16,11 @@ import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
 import com.agentcrossing.platform.domain.chat.InMemoryChatThreadRepository;
 import com.agentcrossing.platform.domain.event.InMemoryEventLogRepository;
 import com.agentcrossing.platform.domain.invocation.InMemoryInvocationRepository;
+import com.agentcrossing.platform.domain.invocation.InMemoryInvocationUsageRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationStatus;
+import com.agentcrossing.platform.domain.invocation.InvocationUsage;
+import com.agentcrossing.platform.domain.invocation.UsagePrecision;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
@@ -36,6 +39,7 @@ import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.application.invocation.AgentMessageType;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -280,6 +284,7 @@ class ChatServiceTests {
     void deleteThreadRemovesTraceScopedRuntimeDataAndThreadScopedState() {
         InMemoryInvocationMessageRepository invocationMessageRepository = new InMemoryInvocationMessageRepository();
         InMemoryInvocationRepository invocationRepository = new InMemoryInvocationRepository();
+        InMemoryInvocationUsageRepository invocationUsageRepository = new InMemoryInvocationUsageRepository();
         InMemoryTaskRepository taskRepository = new InMemoryTaskRepository();
         InMemoryTaskDependencyRepository taskDependencyRepository = new InMemoryTaskDependencyRepository();
         InMemoryAgentContextCursorRepository cursorRepository = new InMemoryAgentContextCursorRepository();
@@ -302,6 +307,7 @@ class ChatServiceTests {
                 questHub,
                 Runnable::run,
                 (org.springframework.transaction.support.TransactionTemplate) null);
+        cascadingChatService.setInvocationUsageRepository(invocationUsageRepository);
         ChatThread thread = cascadingChatService.createThread("user-1", "delete me");
         Instant now = Instant.now();
         Task queuedTask = new Task(
@@ -343,6 +349,10 @@ class ChatServiceTests {
                 now,
                 now,
                 null));
+        invocationUsageRepository.save(new InvocationUsage(
+                "inv-delete-1", "opencode", "gpt-5.6", "ses-delete",
+                100L, 100L, UsagePrecision.EXACT, 100L, null, null, null,
+                10L, null, 100L, Map.of("input_tokens", 100L), "test", now));
         invocationMessageRepository.save(new InvocationMessage(
                 "inv-msg-delete-1",
                 "user-1",
@@ -384,6 +394,7 @@ class ChatServiceTests {
         assertThat(messageRepository.findByThreadId(thread.threadId())).isEmpty();
         assertThat(invocationMessageRepository.findByTraceIdAndUserId(thread.traceId(), "user-1")).isEmpty();
         assertThat(invocationRepository.findByTraceIdAndUserId(thread.traceId(), "user-1")).isEmpty();
+        assertThat(invocationUsageRepository.findByInvocationId("inv-delete-1")).isEmpty();
         assertThat(taskRepository.findByTraceIdAndUserId(thread.traceId(), "user-1")).isEmpty();
         assertThat(taskDependencyRepository.findChildTaskIds(queuedTask.taskId())).isEmpty();
         assertThat(taskDependencyRepository.findParentTaskIds(processingTask.taskId())).isEmpty();

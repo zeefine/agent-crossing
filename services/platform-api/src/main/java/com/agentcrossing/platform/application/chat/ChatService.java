@@ -13,12 +13,14 @@ import com.agentcrossing.platform.domain.event.EventLogRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
 import com.agentcrossing.platform.domain.invocation.InvocationStatus;
+import com.agentcrossing.platform.domain.invocation.InvocationUsageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
 import com.agentcrossing.platform.domain.message.InvocationMessageRepository;
 import com.agentcrossing.platform.domain.queue.QuestHub;
+import com.agentcrossing.platform.domain.session.AgentSessionHistoryRepository;
 import com.agentcrossing.platform.domain.session.AgentSessionRepository;
 import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.domain.task.TaskCreationRepository;
@@ -62,11 +64,13 @@ public class ChatService {
     private final UserRepository userRepository;
     private final InvocationMessageRepository invocationMessageRepository;
     private final InvocationRepository invocationRepository;
+    private InvocationUsageRepository invocationUsageRepository;
     private final TaskRepository taskRepository;
     private final TaskCreationRepository taskCreationRepository;
     private final TaskDependencyRepository taskDependencyRepository;
     private final AgentContextCursorRepository agentContextCursorRepository;
     private final AgentSessionRepository agentSessionRepository;
+    private AgentSessionHistoryRepository agentSessionHistoryRepository;
     private final QuestHub questHub;
     private final Executor chatPlanningExecutor;
     private final ThreadPlanningQueue threadPlanningQueue;
@@ -286,6 +290,16 @@ public class ChatService {
         this.transactionTemplate = transactionTemplate;
     }
 
+    @Autowired(required = false)
+    void setAgentSessionHistoryRepository(AgentSessionHistoryRepository agentSessionHistoryRepository) {
+        this.agentSessionHistoryRepository = agentSessionHistoryRepository;
+    }
+
+    @Autowired(required = false)
+    void setInvocationUsageRepository(InvocationUsageRepository invocationUsageRepository) {
+        this.invocationUsageRepository = invocationUsageRepository;
+    }
+
     public ChatThread createThread(String userId, String title) {
         ensureUser(userId);
         Instant now = Instant.now();
@@ -358,6 +372,12 @@ public class ChatService {
         if (invocationMessageRepository != null) {
             invocationMessageRepository.deleteByTraceIdAndUserId(traceId, userId);
         }
+        if (invocationUsageRepository != null && invocationRepository != null) {
+            List<String> invocationIds = invocationRepository.findByTraceIdAndUserId(traceId, userId).stream()
+                    .map(Invocation::invocationId)
+                    .toList();
+            invocationUsageRepository.deleteByInvocationIds(invocationIds);
+        }
         if (invocationRepository != null) {
             invocationRepository.deleteByTraceIdAndUserId(traceId, userId);
         }
@@ -375,6 +395,9 @@ public class ChatService {
         }
         if (agentSessionRepository != null) {
             agentSessionRepository.deleteByThreadId(userId, threadId);
+        }
+        if (agentSessionHistoryRepository != null) {
+            agentSessionHistoryRepository.deleteByThreadId(userId, threadId);
         }
         chatMessageRepository.deleteByThreadId(threadId);
         if (eventLogRepository != null) {

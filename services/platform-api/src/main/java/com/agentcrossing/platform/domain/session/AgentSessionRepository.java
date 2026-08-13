@@ -7,5 +7,7 @@ public interface AgentSessionRepository {
 
     AgentSession save(AgentSession session);
 
+    void delete(String userId, String threadId, String agentId, String provider);
+
     void deleteByThreadId(String userId, String threadId);
 }

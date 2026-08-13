@@ -192,6 +192,85 @@ PREPARE ac_invocation_add_user_id_stmt FROM @ac_invocation_add_user_id_sql;
 EXECUTE ac_invocation_add_user_id_stmt;
 DEALLOCATE PREPARE ac_invocation_add_user_id_stmt;
 
+-- 每个 invocation 仅保存一条 Provider 最终聚合用量。
+-- total_input_tokens 用于累计消耗统计；last_request_input_tokens 用于上下文压缩判断。
+-- usage_precision 标记 last_request_input_tokens 的可信粒度，例如 EXACT、TURN_AGGREGATE、
+-- ESTIMATED 或 UNKNOWN。
+CREATE TABLE IF NOT EXISTS invocation_usage (
+    invocation_id VARCHAR(128) NOT NULL,
+    provider VARCHAR(64) NOT NULL,
+    model VARCHAR(255) NOT NULL,
+    provider_session_id VARCHAR(255) NULL,
+    total_input_tokens BIGINT NULL,
+    last_request_input_tokens BIGINT NULL,
+    usage_precision VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
+    input_tokens BIGINT NULL,
+    cached_input_tokens BIGINT NULL,
+    cache_creation_input_tokens BIGINT NULL,
+    cache_read_input_tokens BIGINT NULL,
+    output_tokens BIGINT NULL,
+    reasoning_output_tokens BIGINT NULL,
+    context_input_tokens BIGINT NOT NULL,
+    raw_usage_json JSON NULL,
+    provider_cli_version VARCHAR(64) NULL,
+    observed_at TIMESTAMP(3) NOT NULL,
+    PRIMARY KEY (invocation_id),
+    KEY idx_invocation_usage_provider_session_observed (
+        provider,
+        provider_session_id,
+        observed_at
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @ac_iu_has_total_input_tokens := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'invocation_usage'
+      AND COLUMN_NAME = 'total_input_tokens'
+);
+SET @ac_iu_add_total_input_tokens_sql := IF(
+    @ac_iu_has_total_input_tokens = 0,
+    'ALTER TABLE invocation_usage ADD COLUMN total_input_tokens BIGINT NULL AFTER provider_session_id',
+    'SELECT 1'
+);
+PREPARE ac_iu_add_total_input_tokens_stmt FROM @ac_iu_add_total_input_tokens_sql;
+EXECUTE ac_iu_add_total_input_tokens_stmt;
+DEALLOCATE PREPARE ac_iu_add_total_input_tokens_stmt;
+
+SET @ac_iu_has_last_request_input_tokens := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'invocation_usage'
+      AND COLUMN_NAME = 'last_request_input_tokens'
+);
+SET @ac_iu_add_last_request_input_tokens_sql := IF(
+    @ac_iu_has_last_request_input_tokens = 0,
+    'ALTER TABLE invocation_usage ADD COLUMN last_request_input_tokens BIGINT NULL AFTER total_input_tokens',
+    'SELECT 1'
+);
+PREPARE ac_iu_add_last_request_input_tokens_stmt FROM @ac_iu_add_last_request_input_tokens_sql;
+EXECUTE ac_iu_add_last_request_input_tokens_stmt;
+DEALLOCATE PREPARE ac_iu_add_last_request_input_tokens_stmt;
+
+SET @ac_iu_has_usage_precision := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'invocation_usage'
+      AND COLUMN_NAME = 'usage_precision'
+);
+SET @ac_iu_add_usage_precision_sql := IF(
+    @ac_iu_has_usage_precision = 0,
+    'ALTER TABLE invocation_usage ADD COLUMN usage_precision VARCHAR(32) NOT NULL DEFAULT ''UNKNOWN'' AFTER last_request_input_tokens',
+    'SELECT 1'
+);
+PREPARE ac_iu_add_usage_precision_stmt FROM @ac_iu_add_usage_precision_sql;
+EXECUTE ac_iu_add_usage_precision_stmt;
+DEALLOCATE PREPARE ac_iu_add_usage_precision_stmt;
+
+UPDATE invocation_usage
+SET total_input_tokens = context_input_tokens
+WHERE total_input_tokens IS NULL;
+
 CREATE TABLE IF NOT EXISTS chat_thread (
     thread_id VARCHAR(128) NOT NULL,
     user_id VARCHAR(128) NOT NULL DEFAULT 'anonymous',
@@ -310,7 +389,7 @@ CREATE TABLE IF NOT EXISTS agent_session (
     trace_id VARCHAR(128) NOT NULL,
     agent_id VARCHAR(128) NOT NULL,
     provider VARCHAR(64) NOT NULL,
-    provider_session_id VARCHAR(255) NOT NULL,
+    provider_session_id VARCHAR(255) NULL,
     prompt_version VARCHAR(64) NOT NULL,
     created_at TIMESTAMP(3) NOT NULL,
     updated_at TIMESTAMP(3) NOT NULL,
@@ -437,6 +516,183 @@ SET @ac_agent_session_drop_thread_idx_sql := IF(
 PREPARE ac_agent_session_drop_thread_idx_stmt FROM @ac_agent_session_drop_thread_idx_sql;
 EXECUTE ac_agent_session_drop_thread_idx_stmt;
 DEALLOCATE PREPARE ac_agent_session_drop_thread_idx_stmt;
+
+CREATE TABLE IF NOT EXISTS agent_session_history (
+    session_record_id VARCHAR(128) NOT NULL,
+    user_id VARCHAR(128) NOT NULL,
+    thread_id VARCHAR(128) NOT NULL,
+    trace_id VARCHAR(128) NOT NULL,
+    agent_id VARCHAR(128) NOT NULL,
+    provider VARCHAR(64) NOT NULL,
+    provider_session_id VARCHAR(255) NOT NULL,
+    generation INT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    predecessor_session_record_id VARCHAR(128) NULL,
+    startup_summary MEDIUMTEXT NULL,
+    compacted_start_message_id VARCHAR(128) NULL,
+    compacted_end_message_id VARCHAR(128) NULL,
+    keep_tail_from_message_id VARCHAR(128) NULL,
+    summary_tokens BIGINT NULL,
+    summary_model VARCHAR(255) NULL,
+    summary_prompt_version VARCHAR(64) NULL,
+    rotation_reason VARCHAR(64) NULL,
+    final_context_input_tokens BIGINT NULL,
+    created_at TIMESTAMP(3) NOT NULL,
+    activated_at TIMESTAMP(3) NULL,
+    superseded_at TIMESTAMP(3) NULL,
+    PRIMARY KEY (session_record_id),
+    UNIQUE KEY uk_agent_session_history_provider_session (
+        provider,
+        provider_session_id
+    ),
+    UNIQUE KEY uk_agent_session_history_generation (
+        user_id,
+        thread_id,
+        agent_id,
+        provider,
+        generation
+    ),
+    KEY idx_agent_session_history_current (
+        user_id,
+        thread_id,
+        agent_id,
+        provider,
+        status
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- CREATING records exist before the next provider session is opened.
+ALTER TABLE agent_session_history
+    MODIFY COLUMN provider_session_id VARCHAR(255) NULL,
+    MODIFY COLUMN activated_at TIMESTAMP(3) NULL;
+
+SET @ac_agent_session_history_has_startup_summary := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'startup_summary'
+);
+SET @ac_agent_session_history_add_startup_summary_sql := IF(
+    @ac_agent_session_history_has_startup_summary = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN startup_summary MEDIUMTEXT NULL AFTER predecessor_session_record_id',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_startup_summary_stmt
+    FROM @ac_agent_session_history_add_startup_summary_sql;
+EXECUTE ac_agent_session_history_add_startup_summary_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_startup_summary_stmt;
+
+SET @ac_agent_session_history_has_compacted_start := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'compacted_start_message_id'
+);
+SET @ac_agent_session_history_add_compacted_start_sql := IF(
+    @ac_agent_session_history_has_compacted_start = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN compacted_start_message_id VARCHAR(128) NULL AFTER startup_summary',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_compacted_start_stmt
+    FROM @ac_agent_session_history_add_compacted_start_sql;
+EXECUTE ac_agent_session_history_add_compacted_start_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_compacted_start_stmt;
+
+SET @ac_agent_session_history_has_compacted_end := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'compacted_end_message_id'
+);
+SET @ac_agent_session_history_add_compacted_end_sql := IF(
+    @ac_agent_session_history_has_compacted_end = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN compacted_end_message_id VARCHAR(128) NULL AFTER compacted_start_message_id',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_compacted_end_stmt
+    FROM @ac_agent_session_history_add_compacted_end_sql;
+EXECUTE ac_agent_session_history_add_compacted_end_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_compacted_end_stmt;
+
+SET @ac_agent_session_history_has_keep_tail := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'keep_tail_from_message_id'
+);
+SET @ac_agent_session_history_add_keep_tail_sql := IF(
+    @ac_agent_session_history_has_keep_tail = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN keep_tail_from_message_id VARCHAR(128) NULL AFTER compacted_end_message_id',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_keep_tail_stmt
+    FROM @ac_agent_session_history_add_keep_tail_sql;
+EXECUTE ac_agent_session_history_add_keep_tail_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_keep_tail_stmt;
+
+SET @ac_agent_session_history_has_summary_tokens := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'summary_tokens'
+);
+SET @ac_agent_session_history_add_summary_tokens_sql := IF(
+    @ac_agent_session_history_has_summary_tokens = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN summary_tokens BIGINT NULL AFTER keep_tail_from_message_id',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_summary_tokens_stmt
+    FROM @ac_agent_session_history_add_summary_tokens_sql;
+EXECUTE ac_agent_session_history_add_summary_tokens_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_summary_tokens_stmt;
+
+SET @ac_agent_session_history_has_summary_model := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'summary_model'
+);
+SET @ac_agent_session_history_add_summary_model_sql := IF(
+    @ac_agent_session_history_has_summary_model = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN summary_model VARCHAR(255) NULL AFTER summary_tokens',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_summary_model_stmt
+    FROM @ac_agent_session_history_add_summary_model_sql;
+EXECUTE ac_agent_session_history_add_summary_model_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_summary_model_stmt;
+
+SET @ac_agent_session_history_has_summary_prompt_version := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'summary_prompt_version'
+);
+SET @ac_agent_session_history_add_summary_prompt_version_sql := IF(
+    @ac_agent_session_history_has_summary_prompt_version = 0,
+    'ALTER TABLE agent_session_history ADD COLUMN summary_prompt_version VARCHAR(64) NULL AFTER summary_model',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_add_summary_prompt_version_stmt
+    FROM @ac_agent_session_history_add_summary_prompt_version_sql;
+EXECUTE ac_agent_session_history_add_summary_prompt_version_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_add_summary_prompt_version_stmt;
+
+SET @ac_agent_session_history_has_checkpoint_id := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'agent_session_history'
+      AND COLUMN_NAME = 'checkpoint_id'
+);
+SET @ac_agent_session_history_drop_checkpoint_id_sql := IF(
+    @ac_agent_session_history_has_checkpoint_id > 0,
+    'ALTER TABLE agent_session_history DROP COLUMN checkpoint_id',
+    'SELECT 1'
+);
+PREPARE ac_agent_session_history_drop_checkpoint_id_stmt
+    FROM @ac_agent_session_history_drop_checkpoint_id_sql;
+EXECUTE ac_agent_session_history_drop_checkpoint_id_stmt;
+DEALLOCATE PREPARE ac_agent_session_history_drop_checkpoint_id_stmt;
 
 CREATE TABLE IF NOT EXISTS invocation_message (
     message_id VARCHAR(128) NOT NULL,

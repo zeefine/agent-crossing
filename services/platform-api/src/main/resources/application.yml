@@ -35,6 +35,16 @@ agent-crossing:
   default-agent-id: ${DEFAULT_AGENT_ID:opencode}
   realtime:
     sse-enabled: ${SSE_ENABLED:false}
+  session-compression:
+    enabled: ${SESSION_COMPRESSION_ENABLED:true}
+    model: ${SESSION_COMPRESSION_MODEL:gpt-5.6}
+    context-window-tokens: ${SESSION_COMPRESSION_CONTEXT_WINDOW_TOKENS:1000000}
+    trigger-ratio: ${SESSION_COMPRESSION_TRIGGER_RATIO:0.8}
+    keep-tail-user-turns: ${SESSION_COMPRESSION_KEEP_TAIL_USER_TURNS:3}
+    max-tail-messages: ${SESSION_COMPRESSION_MAX_TAIL_MESSAGES:20}
+    # Approximate 50k tokens using a conservative four characters per token.
+    max-tail-characters: ${SESSION_COMPRESSION_MAX_TAIL_CHARACTERS:200000}
+    summary-model: ${SESSION_COMPRESSION_SUMMARY_MODEL:gpt-5.6}
   agents:
     - agent-id: opencode
       display-name: OpenCode

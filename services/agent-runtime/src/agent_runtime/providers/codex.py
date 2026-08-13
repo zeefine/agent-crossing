@@ -17,6 +17,7 @@ from agent_runtime.contracts.models import AgentExecutionRequest, AgentMessage, 
 from agent_runtime.prompt_config import load_prompt_config
 from agent_runtime.prompt_session import annotate_prompt_version, prepare_execution_request
 from agent_runtime.providers.base import BaseProvider
+from agent_runtime.providers.usage import normalize_cli_usage
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 
 
@@ -187,6 +188,14 @@ class CodexProvider(BaseProvider):
         if session_id:
             done.raw["sessionId"] = session_id
             done.raw["providerSessionId"] = session_id
+        usage = normalize_cli_usage(
+            "codex",
+            diagnostics.pop("usageEvent", None),
+            settings.codex_model,
+            session_id,
+        )
+        if usage is not None:
+            done.raw["usage"] = usage
         messages.append(done)
         return messages
 
@@ -419,6 +428,8 @@ class CodexProvider(BaseProvider):
     @staticmethod
     def _record_non_chat_event(diagnostics: dict[str, Any], event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
+        if event_type == "turn.completed" and isinstance(event.get("usage"), dict):
+            diagnostics["usageEvent"] = event
         item = event.get("item")
         item_type = str(item.get("type") or "") if isinstance(item, dict) else ""
         if event_type.startswith("item.") and item_type and item_type != "agent_message":

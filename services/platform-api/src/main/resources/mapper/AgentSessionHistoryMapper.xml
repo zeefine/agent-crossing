@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.AgentSessionHistoryMapper">
+    <resultMap id="AgentSessionHistoryResultMap"
+               type="com.agentcrossing.platform.domain.session.AgentSessionHistory">
+        <constructor>
+            <idArg column="session_record_id" javaType="java.lang.String"/>
+            <arg column="user_id" javaType="java.lang.String"/>
+            <arg column="thread_id" javaType="java.lang.String"/>
+            <arg column="trace_id" javaType="java.lang.String"/>
+            <arg column="agent_id" javaType="java.lang.String"/>
+            <arg column="provider" javaType="java.lang.String"/>
+            <arg column="provider_session_id" javaType="java.lang.String"/>
+            <arg column="generation" javaType="int"/>
+            <arg column="status" javaType="com.agentcrossing.platform.domain.session.AgentSessionHistoryStatus"/>
+            <arg column="predecessor_session_record_id" javaType="java.lang.String"/>
+            <arg column="startup_summary" javaType="java.lang.String"/>
+            <arg column="compacted_start_message_id" javaType="java.lang.String"/>
+            <arg column="compacted_end_message_id" javaType="java.lang.String"/>
+            <arg column="keep_tail_from_message_id" javaType="java.lang.String"/>
+            <arg column="summary_tokens" javaType="java.lang.Long"/>
+            <arg column="summary_model" javaType="java.lang.String"/>
+            <arg column="summary_prompt_version" javaType="java.lang.String"/>
+            <arg column="rotation_reason" javaType="java.lang.String"/>
+            <arg column="final_context_input_tokens" javaType="java.lang.Long"/>
+            <arg column="created_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="activated_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+            <arg column="superseded_at" javaType="java.time.Instant"
+                 typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler"/>
+        </constructor>
+    </resultMap>
+
+    <sql id="AgentSessionHistoryColumns">
+        session_record_id, user_id, thread_id, trace_id, agent_id, provider, provider_session_id,
+        generation, status, predecessor_session_record_id,
+        startup_summary, compacted_start_message_id, compacted_end_message_id, keep_tail_from_message_id,
+        summary_tokens, summary_model, summary_prompt_version,
+        rotation_reason, final_context_input_tokens,
+        created_at, activated_at, superseded_at
+    </sql>
+
+    <insert id="insert" parameterType="com.agentcrossing.platform.domain.session.AgentSessionHistory">
+        INSERT INTO agent_session_history (
+            <include refid="AgentSessionHistoryColumns"/>
+        ) VALUES (
+            #{sessionRecordId}, #{userId}, #{threadId}, #{traceId}, #{agentId}, #{provider}, #{providerSessionId},
+            #{generation}, #{status}, #{predecessorSessionRecordId},
+            #{startupSummary}, #{compactedStartMessageId}, #{compactedEndMessageId}, #{keepTailFromMessageId},
+            #{summaryTokens}, #{summaryModel}, #{summaryPromptVersion},
+            #{rotationReason}, #{finalContextInputTokens},
+            #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{activatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            #{supersededAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        )
+    </insert>
+
+    <update id="updateBySessionRecordId"
+            parameterType="com.agentcrossing.platform.domain.session.AgentSessionHistory">
+        UPDATE agent_session_history
+        SET user_id = #{userId},
+            thread_id = #{threadId},
+            trace_id = #{traceId},
+            agent_id = #{agentId},
+            provider = #{provider},
+            provider_session_id = #{providerSessionId},
+            generation = #{generation},
+            status = #{status},
+            predecessor_session_record_id = #{predecessorSessionRecordId},
+            startup_summary = #{startupSummary},
+            compacted_start_message_id = #{compactedStartMessageId},
+            compacted_end_message_id = #{compactedEndMessageId},
+            keep_tail_from_message_id = #{keepTailFromMessageId},
+            summary_tokens = #{summaryTokens},
+            summary_model = #{summaryModel},
+            summary_prompt_version = #{summaryPromptVersion},
+            rotation_reason = #{rotationReason},
+            final_context_input_tokens = #{finalContextInputTokens},
+            created_at = #{createdAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            activated_at = #{activatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler},
+            superseded_at = #{supersededAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        WHERE session_record_id = #{sessionRecordId}
+    </update>
+
+    <select id="findBySessionRecordId" resultMap="AgentSessionHistoryResultMap">
+        SELECT <include refid="AgentSessionHistoryColumns"/>
+        FROM agent_session_history
+        WHERE session_record_id = #{sessionRecordId}
+    </select>
+
+    <select id="findByProviderSessionId" resultMap="AgentSessionHistoryResultMap">
+        SELECT <include refid="AgentSessionHistoryColumns"/>
+        FROM agent_session_history
+        WHERE provider = #{provider} AND provider_session_id = #{providerSessionId}
+    </select>
+
+    <select id="findByGeneration" resultMap="AgentSessionHistoryResultMap">
+        SELECT <include refid="AgentSessionHistoryColumns"/>
+        FROM agent_session_history
+        WHERE user_id = #{userId}
+          AND thread_id = #{threadId}
+          AND agent_id = #{agentId}
+          AND provider = #{provider}
+          AND generation = #{generation}
+    </select>
+
+    <select id="findActive" resultMap="AgentSessionHistoryResultMap">
+        SELECT <include refid="AgentSessionHistoryColumns"/>
+        FROM agent_session_history
+        WHERE user_id = #{userId}
+          AND thread_id = #{threadId}
+          AND agent_id = #{agentId}
+          AND provider = #{provider}
+          AND status = #{status}
+        ORDER BY generation DESC
+        LIMIT 1
+    </select>
+
+    <select id="findCreating" resultMap="AgentSessionHistoryResultMap">
+        SELECT <include refid="AgentSessionHistoryColumns"/>
+        FROM agent_session_history
+        WHERE user_id = #{userId}
+          AND thread_id = #{threadId}
+          AND agent_id = #{agentId}
+          AND provider = #{provider}
+          AND status = #{status}
+        ORDER BY generation DESC
+        LIMIT 1
+    </select>
+
+    <select id="findByThreadId" resultMap="AgentSessionHistoryResultMap">
+        SELECT <include refid="AgentSessionHistoryColumns"/>
+        FROM agent_session_history
+        WHERE user_id = #{userId}
+          AND thread_id = #{threadId}
+          AND agent_id = #{agentId}
+          AND provider = #{provider}
+        ORDER BY generation ASC
+    </select>
+
+    <delete id="deleteByThreadId">
+        DELETE FROM agent_session_history
+        WHERE user_id = #{userId} AND thread_id = #{threadId}
+    </delete>
+</mapper>

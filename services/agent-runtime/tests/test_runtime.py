@@ -10,14 +10,19 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from agent_runtime.api import routes
+from agent_runtime.business_prompt import business_prompt_composer
 from agent_runtime.config import settings
 from agent_runtime.contracts.models import (
+    AgentContextPack,
     AgentExecutionRequest,
     AgentExecutionResponse,
+    AgentExecutionUsage,
     AgentMessage,
     AgentMessageType,
+    IncrementalChatMessage,
 )
 from agent_runtime.main import create_app
+from agent_runtime.master_agent.session_compressor import SessionCompressor
 from agent_runtime.providers.claudecode import ClaudeCodeProvider
 from agent_runtime.providers.codex import CodexProvider
 from agent_runtime.providers.opencode import OpenCodeProvider
@@ -89,6 +94,137 @@ def test_runtime_service_exposes_prompt_version_from_done_message() -> None:
     response = asyncio.run(service.execute(execution_request()))
 
     assert response.prompt_version == "prompt-v2"
+
+
+def test_runtime_service_exposes_usage_from_done_message() -> None:
+    class UsageProvider:
+        agent_id = "codex"
+
+        async def execute(self, request: AgentExecutionRequest) -> list[AgentMessage]:
+            return [
+                AgentMessage(
+                    invocationId=request.invocation_id,
+                    taskId=request.task_id,
+                    traceId=request.trace_id,
+                    agentId=request.agent_id,
+                    type=AgentMessageType.DONE,
+                    raw={
+                        "usage": {
+                            "provider": "codex",
+                            "model": "gpt-test",
+                            "usagePrecision": "TURN_AGGREGATE",
+                            "inputTokens": 120,
+                            "contextInputTokens": 120,
+                            "observedAt": "2026-08-13T03:00:00Z",
+                        }
+                    },
+                    createdAt=datetime.now(timezone.utc),
+                )
+            ]
+
+    service = AgentRuntimeService(ProviderRegistry([UsageProvider()]))
+    request = execution_request().model_copy(update={"agent_id": "codex"})
+
+    response = asyncio.run(service.execute(request))
+
+    assert response.usage is not None
+    assert response.usage.provider == "codex"
+    assert response.usage.context_input_tokens == 120
+
+
+def test_runtime_schema_declares_the_full_usage_response_contract() -> None:
+    schema_path = Path(__file__).resolve().parents[3] / "contracts/schemas/runtime-event.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    response_schema = schema["$defs"]["AgentExecutionResponse"]
+    usage_schema = schema["$defs"]["AgentExecutionUsage"]
+    response = AgentExecutionResponse(
+        messages=[],
+        usage=AgentExecutionUsage(
+            provider="codex",
+            model="gpt-5.6",
+            providerSessionId="session-1",
+            totalInputTokens=120,
+            lastRequestInputTokens=100,
+            usagePrecision="EXACT",
+            inputTokens=120,
+            cachedInputTokens=80,
+            cacheCreationInputTokens=0,
+            cacheReadInputTokens=80,
+            outputTokens=9,
+            reasoningOutputTokens=3,
+            contextInputTokens=100,
+            rawUsageJson={"usage": {"input_tokens": 120}},
+            providerCliVersion="test",
+            observedAt="2026-08-13T03:00:00Z",
+        ),
+    ).model_dump(mode="json", by_alias=True)
+
+    assert set(response) <= set(response_schema["properties"])
+    assert response_schema["properties"]["usage"]["anyOf"][0]["$ref"] == "#/$defs/AgentExecutionUsage"
+    assert set(response["usage"]) <= set(usage_schema["properties"])
+    assert set(usage_schema["required"]) <= set(response["usage"])
+
+
+def test_business_prompt_reinjects_static_rules_summary_and_retained_tail() -> None:
+    request = execution_request().model_copy(
+        update={
+            "agent_id": "codex",
+            "provider_session_id": None,
+            "context_pack": AgentContextPack(
+                startupSummary='{"schemaVersion":1,"objective":"continue"}',
+                incrementalChatMessages=[
+                    IncrementalChatMessage(
+                        messageId="message-1",
+                        role="user",
+                        content="latest user message",
+                        createdAt="2026-08-13T03:00:00Z",
+                    )
+                ],
+            ),
+        }
+    )
+
+    prompt = business_prompt_composer.compose(request)
+
+    assert prompt.index("[Role]") < prompt.index("[Compressed Conversation Memory]")
+    assert prompt.index("[Compressed Conversation Memory]") < prompt.rindex("[Invocation Context]")
+    assert "[Retained Conversation Tail]" in prompt
+    assert prompt.index("[Retained Conversation Tail]") < prompt.index("Task:")
+
+
+def test_session_compressor_parses_claude_json_envelope() -> None:
+    output = json.dumps(
+        {
+            "type": "result",
+            "result": json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "objective": "continue",
+                    "continuationGuidance": "use retained tail",
+                }
+            ),
+        }
+    )
+
+    summary = SessionCompressor._parse_summary(output)
+
+    assert summary["schemaVersion"] == 1
+    assert summary["objective"] == "continue"
+
+
+def test_session_compressor_keeps_outer_summary_with_nested_objects() -> None:
+    output = json.dumps(
+        {
+            "schemaVersion": 1,
+            "objective": "continue",
+            "decisions": [{"subject": "storage", "decision": "mysql"}],
+        }
+    )
+
+    summary = SessionCompressor._parse_summary(output)
+
+    assert summary["schemaVersion"] == 1
+    assert summary["decisions"][0]["decision"] == "mysql"
 
 
 def test_runtime_service_rejects_unknown_agent() -> None:
@@ -180,7 +316,7 @@ def test_claudecode_provider_builds_stream_json_command_and_parses_events() -> N
             "assert 'stream-json' in sys.argv; "
             "print(json.dumps({'type':'system','subtype':'init','session_id':'claude-session'})); "
             "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'answer'}, {'type':'tool_use','name':'Read','input':{'file':'README.md'}}]}})); "
-            "print(json.dumps({'type':'result','subtype':'success'}))\""
+            "print(json.dumps({'type':'result','subtype':'success','usage':{'input_tokens':100,'cache_creation_input_tokens':20,'cache_read_input_tokens':30,'output_tokens':8}}))\""
         )
     )
     request = execution_request().model_copy(update={"agent_id": "claudecode"})
@@ -195,6 +331,8 @@ def test_claudecode_provider_builds_stream_json_command_and_parses_events() -> N
     assert messages[0].content == "answer"
     assert messages[1].content == "tool_use:Read"
     assert messages[-1].raw["providerSessionId"] == "claude-session"
+    assert messages[-1].raw["usage"]["contextInputTokens"] == 150
+    assert messages[-1].raw["usage"]["usagePrecision"] == "TURN_AGGREGATE"
 
 
 def test_claudecode_provider_dedupes_repeated_assistant_snapshots() -> None:
@@ -455,7 +593,7 @@ def test_codex_provider_builds_json_command_and_parses_completed_agent_message(t
                 "print(json.dumps({'type': 'item.started', 'item': {'type': 'command_execution', 'command': 'pwd'}}))",
                 "print(json.dumps({'type': 'item.completed', 'item': {'type': 'command_execution', 'aggregated_output': '/tmp'}}))",
                 "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Codex answer'}}))",
-                "print(json.dumps({'type': 'turn.completed'}))",
+                "print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 120, 'cached_input_tokens': 80, 'output_tokens': 9}}))",
             ]
         ),
         encoding="utf-8",
@@ -481,6 +619,8 @@ def test_codex_provider_builds_json_command_and_parses_completed_agent_message(t
     assert messages[0].content == "Codex answer"
     assert messages[-1].raw["providerSessionId"] == "codex-thread-1"
     assert messages[-1].raw["diagnostics"]["nonChatEventCount"] == 2
+    assert messages[-1].raw["usage"]["contextInputTokens"] == 120
+    assert messages[-1].raw["usage"]["cachedInputTokens"] == 80
 
 
 def test_codex_provider_resumes_provider_session_and_omits_static_prompt(tmp_path: Path) -> None:

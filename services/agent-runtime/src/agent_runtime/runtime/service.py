@@ -48,6 +48,7 @@ class AgentRuntimeService:
             streamCompleted=bool(done_raw.get("callbackCompleted", False)),
             lastSequence=done_raw.get("callbackLastSequence"),
             promptVersion=done_raw.get("promptVersion"),
+            usage=done_raw.get("usage"),
         )
 
     async def cancel(self, invocation_id: str) -> bool:

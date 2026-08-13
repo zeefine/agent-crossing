@@ -13,6 +13,9 @@ import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
 import com.agentcrossing.platform.domain.message.InMemoryChatMessageRepository;
+import com.agentcrossing.platform.domain.session.AgentSessionHistory;
+import com.agentcrossing.platform.domain.session.AgentSessionHistoryStatus;
+import com.agentcrossing.platform.domain.session.InMemoryAgentSessionHistoryRepository;
 import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.domain.task.TaskSource;
 import com.agentcrossing.platform.domain.task.TaskStatus;
@@ -21,6 +24,38 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class AgentContextServiceTests {
+    @Test
+    void injectsCompressedSummaryAndRetainedTailForPendingSession() {
+        InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
+        InMemoryChatMessageRepository messageRepository = new InMemoryChatMessageRepository();
+        InMemoryAgentSessionHistoryRepository historyRepository = new InMemoryAgentSessionHistoryRepository();
+        Instant now = Instant.parse("2026-08-13T03:00:00Z");
+        threadRepository.save(new ChatThread(
+                "thread-1", "user-1", "Compressed", ChatThreadStatus.RUNNING, "trace-1", now, now));
+        messageRepository.save(new ChatMessage(
+                "message-old", "thread-1", ChatMessageRole.USER, "old", ChatMessageStatus.COMPLETED,
+                null, null, null, now, now));
+        messageRepository.save(new ChatMessage(
+                "message-tail", "thread-1", ChatMessageRole.ASSISTANT, "retained own answer",
+                ChatMessageStatus.COMPLETED, "invocation-1", "task-1", "opencode",
+                now.plusSeconds(1), now.plusSeconds(1)));
+        historyRepository.save(new AgentSessionHistory(
+                "session-record-2", "user-1", "thread-1", "trace-1", "opencode", "opencode",
+                null, 2, AgentSessionHistoryStatus.CREATING, "session-record-1",
+                "{\"schemaVersion\":1}", "message-old", "message-old", "message-tail",
+                null, "gpt-5.6", "summary-v1", "TOKEN_THRESHOLD", null, now, null, null));
+        AgentContextService service = new AgentContextService(
+                threadRepository, messageRepository, new InMemoryAgentContextCursorRepository(), null,
+                historyRepository);
+
+        AgentContextPack pack = service.buildContextPack(task(now));
+
+        assertThat(pack.startupSummary()).isEqualTo("{\"schemaVersion\":1}");
+        assertThat(pack.incrementalChatMessages())
+                .extracting(IncrementalChatMessage::messageId)
+                .containsExactly("message-tail");
+    }
+
     @Test
     void keepsOnlyTheLatestTwentyVisibleMessagesInChronologicalOrder() {
         InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();

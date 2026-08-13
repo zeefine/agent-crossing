@@ -11,6 +11,8 @@ import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
 import com.agentcrossing.platform.domain.invocation.InvocationStatus;
+import com.agentcrossing.platform.domain.invocation.InvocationUsage;
+import com.agentcrossing.platform.domain.invocation.InvocationUsageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
@@ -51,6 +53,8 @@ public class InvocationService {
     private final AssistantStreamBuffer assistantStreamBuffer;
     private final AgentContextService agentContextService;
     private final AgentSessionRepository agentSessionRepository;
+    private final InvocationUsageRepository invocationUsageRepository;
+    private final AgentSessionCompressionService sessionCompressionService;
     private final ThreadStatusAggregator threadStatusAggregator;
 
     public InvocationService(
@@ -83,6 +87,49 @@ public class InvocationService {
                 taskDependencyRepository,
                 agentContextService,
                 agentSessionRepository,
+                null,
+                null,
+                new ThreadStatusAggregator(
+                        chatThreadRepository,
+                        taskRepository,
+                        invocationRepository,
+                        new ThreadPlanningQueue(Runnable::run),
+                        chatEventService));
+    }
+
+    public InvocationService(
+            InvocationRepository invocationRepository,
+            TaskRepository taskRepository,
+            AgentRuntimeClient agentRuntimeClient,
+            String callbackBaseUrl,
+            TaskDispatchSignal taskDispatchSignal,
+            InvocationMessageRepository invocationMessageRepository,
+            ChatThreadRepository chatThreadRepository,
+            ChatMessageRepository chatMessageRepository,
+            ChatEventService chatEventService,
+            TaskEventService taskEventService,
+            AssistantStreamBuffer assistantStreamBuffer,
+            TaskDependencyRepository taskDependencyRepository,
+            AgentContextService agentContextService,
+            AgentSessionRepository agentSessionRepository,
+            InvocationUsageRepository invocationUsageRepository) {
+        this(
+                invocationRepository,
+                taskRepository,
+                agentRuntimeClient,
+                callbackBaseUrl,
+                taskDispatchSignal,
+                invocationMessageRepository,
+                chatThreadRepository,
+                chatMessageRepository,
+                chatEventService,
+                taskEventService,
+                assistantStreamBuffer,
+                taskDependencyRepository,
+                agentContextService,
+                agentSessionRepository,
+                invocationUsageRepository,
+                null,
                 new ThreadStatusAggregator(
                         chatThreadRepository,
                         taskRepository,
@@ -107,6 +154,8 @@ public class InvocationService {
             TaskDependencyRepository taskDependencyRepository,
             AgentContextService agentContextService,
             AgentSessionRepository agentSessionRepository,
+            InvocationUsageRepository invocationUsageRepository,
+            AgentSessionCompressionService sessionCompressionService,
             ThreadStatusAggregator threadStatusAggregator) {
         this.invocationRepository = invocationRepository;
         this.taskRepository = taskRepository;
@@ -122,6 +171,8 @@ public class InvocationService {
         this.assistantStreamBuffer = assistantStreamBuffer;
         this.agentContextService = agentContextService;
         this.agentSessionRepository = agentSessionRepository;
+        this.invocationUsageRepository = invocationUsageRepository;
+        this.sessionCompressionService = sessionCompressionService;
         this.threadStatusAggregator = threadStatusAggregator;
     }
 
@@ -156,14 +207,15 @@ public class InvocationService {
                     task.traceId(),
                     task.agentId(),
                     result.messages().size());
+            InvocationUsage invocationUsage = persistInvocationUsage(invocation, task, result);
             if (isCanceled(invocation.invocationId(), task.taskId())) {
                 return finishCanceledInvocation(invocation, task);
             }
-            rememberProviderSession(task, result);
             persistAgentMessages(invocation, result);
             if (result.hasError()) {
                 throw new RuntimeException(result.errorOutput());
             }
+            rememberProviderSession(task, result);
             reconcileFinalText(invocation, result.finalText());
             invocation = invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.SUCCEEDED);
             Task completedTask = taskRepository.updateStatus(task.taskId(), TaskStatus.COMPLETED);
@@ -171,6 +223,7 @@ public class InvocationService {
             publishTask(completedTask);
             threadStatusAggregator.refreshForTrace(completedTask.userId(), completedTask.traceId());
             acknowledgeInjectedContext(task, contextPack);
+            compactSessionIfNeeded(task, invocationUsage);
             return invocation;
         } catch (RuntimeException exception) {
             if (isCanceled(invocation.invocationId(), task.taskId())) {
@@ -291,7 +344,7 @@ public class InvocationService {
                 .findByThreadId(task.userId(), threadId, task.agentId(), provider)
                 .map(AgentSession::createdAt)
                 .orElse(now);
-        agentSessionRepository.save(new AgentSession(
+        AgentSession session = new AgentSession(
                 task.userId(),
                 threadId,
                 task.traceId(),
@@ -300,7 +353,12 @@ public class InvocationService {
                 providerSessionId,
                 promptVersion,
                 createdAt,
-                now));
+                now);
+        if (sessionCompressionService != null) {
+            sessionCompressionService.rememberSession(task, threadId, session);
+        } else {
+            agentSessionRepository.save(session);
+        }
     }
 
     private String findThreadId(Task task) {
@@ -316,6 +374,76 @@ public class InvocationService {
 
     private static String providerFor(Task task) {
         return task.agentId();
+    }
+
+    private InvocationUsage persistInvocationUsage(Invocation invocation, Task task, AgentExecutionResult result) {
+        if (invocationUsageRepository == null || result.usage() == null) {
+            return null;
+        }
+        AgentExecutionUsage usage = result.usage();
+        Long contextInputTokens = firstNonNull(
+                usage.contextInputTokens(), usage.lastRequestInputTokens(), usage.inputTokens());
+        if (contextInputTokens == null) {
+            log.warn(
+                    "Skipping invocation usage without context input tokens invocationId={} provider={}",
+                    invocation.invocationId(),
+                    usage.provider());
+            return null;
+        }
+        String provider = nonBlankOrDefault(usage.provider(), providerFor(task));
+        String model = nonBlankOrDefault(usage.model(), "unknown");
+        String providerSessionId = nonBlankOrDefault(usage.providerSessionId(), result.providerSessionId());
+        try {
+            return invocationUsageRepository.save(new InvocationUsage(
+                    invocation.invocationId(),
+                    provider,
+                    model,
+                    providerSessionId,
+                    usage.totalInputTokens(),
+                    usage.lastRequestInputTokens(),
+                    usage.usagePrecision(),
+                    usage.inputTokens(),
+                    usage.cachedInputTokens(),
+                    usage.cacheCreationInputTokens(),
+                    usage.cacheReadInputTokens(),
+                    usage.outputTokens(),
+                    usage.reasoningOutputTokens(),
+                    contextInputTokens,
+                    usage.rawUsageJson(),
+                    usage.providerCliVersion(),
+                    usage.observedAt() == null ? Instant.now() : usage.observedAt()));
+        } catch (RuntimeException exception) {
+            // Usage persistence must not turn a successfully completed provider execution into a failed task.
+            log.warn("Failed to persist invocation usage invocationId={}", invocation.invocationId(), exception);
+            return null;
+        }
+    }
+
+    private void compactSessionIfNeeded(Task task, InvocationUsage usage) {
+        if (sessionCompressionService == null || usage == null) {
+            return;
+        }
+        try {
+            sessionCompressionService.compactIfNeeded(task, usage);
+        } catch (RuntimeException exception) {
+            // A summary failure must never change a successfully completed business invocation.
+            log.warn("Session compression failed after invocation taskId={} agentId={}",
+                    task.taskId(), task.agentId(), exception);
+        }
+    }
+
+    @SafeVarargs
+    private static <T> T firstNonNull(T... values) {
+        for (T value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static String nonBlankOrDefault(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     private void persistAgentMessages(Invocation invocation, AgentExecutionResult result) {

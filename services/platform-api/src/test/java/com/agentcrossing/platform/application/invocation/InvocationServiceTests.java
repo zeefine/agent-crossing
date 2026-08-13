@@ -8,8 +8,10 @@ import com.agentcrossing.platform.domain.chat.ChatThreadStatus;
 import com.agentcrossing.platform.domain.chat.InMemoryChatThreadRepository;
 import com.agentcrossing.platform.domain.context.InMemoryAgentContextCursorRepository;
 import com.agentcrossing.platform.domain.invocation.InMemoryInvocationRepository;
+import com.agentcrossing.platform.domain.invocation.InMemoryInvocationUsageRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationStatus;
+import com.agentcrossing.platform.domain.invocation.UsagePrecision;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
@@ -34,6 +36,8 @@ class InvocationServiceTests {
     private final InMemoryInvocationRepository invocationRepository = new InMemoryInvocationRepository();
     private final InMemoryTaskRepository taskRepository = new InMemoryTaskRepository();
     private final InMemoryTaskDependencyRepository taskDependencyRepository = new InMemoryTaskDependencyRepository();
+    private final InMemoryInvocationUsageRepository invocationUsageRepository =
+            new InMemoryInvocationUsageRepository();
     private final FakeRuntimeClient runtimeClient = new FakeRuntimeClient();
     private final InvocationService service = invocationService(runtimeClient);
 
@@ -57,6 +61,51 @@ class InvocationServiceTests {
         assertThat(invocation.taskId()).isEqualTo(task.taskId());
         assertThat(taskRepository.findByTaskId(task.taskId()).orElseThrow().status()).isEqualTo(TaskStatus.COMPLETED);
         assertThat(runtimeClient.lastRequest.invocationId()).isEqualTo(invocation.invocationId());
+    }
+
+    @Test
+    void persistsNormalizedUsageReturnedByRuntime() {
+        Task task = task("task-usage");
+        taskRepository.save(task);
+        Instant observedAt = Instant.parse("2026-08-13T03:00:00Z");
+        runtimeClient.result = new AgentExecutionResult(
+                List.of(),
+                null,
+                true,
+                1L,
+                "prompt-v1",
+                new AgentExecutionUsage(
+                        "codex",
+                        "gpt-5.6-codex",
+                        "session-123",
+                        42_000L,
+                        18_000L,
+                        UsagePrecision.EXACT,
+                        18_000L,
+                        12_000L,
+                        null,
+                        null,
+                        800L,
+                        200L,
+                        18_000L,
+                        Map.of("input_tokens", 18_000L),
+                        "0.75.0",
+                        observedAt));
+
+        Invocation invocation = service.execute(task);
+
+        assertThat(invocationUsageRepository.findByInvocationId(invocation.invocationId()))
+                .get()
+                .satisfies(usage -> {
+                    assertThat(usage.provider()).isEqualTo("codex");
+                    assertThat(usage.model()).isEqualTo("gpt-5.6-codex");
+                    assertThat(usage.providerSessionId()).isEqualTo("session-123");
+                    assertThat(usage.totalInputTokens()).isEqualTo(42_000L);
+                    assertThat(usage.lastRequestInputTokens()).isEqualTo(18_000L);
+                    assertThat(usage.contextInputTokens()).isEqualTo(18_000L);
+                    assertThat(usage.usagePrecision()).isEqualTo(UsagePrecision.EXACT);
+                    assertThat(usage.observedAt()).isEqualTo(observedAt);
+                });
     }
 
     @Test
@@ -643,7 +692,8 @@ class InvocationServiceTests {
                 null,
                 taskDependencyRepository,
                 agentContextService,
-                agentSessionRepository);
+                agentSessionRepository,
+                invocationUsageRepository);
     }
 
     private static final class FakeRuntimeClient implements AgentRuntimeClient {
