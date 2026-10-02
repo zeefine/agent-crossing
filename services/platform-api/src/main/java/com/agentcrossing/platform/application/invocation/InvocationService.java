@@ -231,8 +231,7 @@ public class InvocationService {
                 throw new RuntimeException(result.errorOutput());
             }
             rememberProviderSession(task, result);
-            reconcileFinalText(invocation, result.finalText());
-            markAssistantStreamFinal(invocation.invocationId(), ChatMessageStatus.COMPLETED, null);
+            completeAssistantStream(invocation, result.finalText());
             acknowledgeInjectedContext(task, contextPack);
             compactSessionIfNeeded(task, invocationUsage);
             // Keep the router's RUNNING/PROCESSING reservation until rotation has committed (or failed).
@@ -595,19 +594,14 @@ public class InvocationService {
         if (chatMessageRepository == null) {
             return;
         }
-        // 终态读 DB 之前先 drain：把内存 buffer 里没 flush 的尾巴强制写回，
-        // 确保 findAssistantStreamByInvocationId 看到的是完整 content。
-        if (assistantStreamBuffer != null) {
-            assistantStreamBuffer.drain(invocationId);
-        }
+        // 调用方已通过 closeCallbackStream 关闭入口并排空 buffer。
         ChatMessage existing = chatMessageRepository
                 .findAssistantStreamByInvocationId(invocationId)
                 .orElse(null);
         if (existing == null) {
             return;
         }
-        // 流式过程中已经有 ERROR 事件把行标记成 FAILED 时，不要被外层 try-block 的 COMPLETED 覆盖。
-        if (existing.status() == ChatMessageStatus.FAILED && finalStatus == ChatMessageStatus.COMPLETED) {
+        if (existing.status() == ChatMessageStatus.CANCELED && finalStatus != ChatMessageStatus.CANCELED) {
             return;
         }
         String content = existing.content();
@@ -630,53 +624,55 @@ public class InvocationService {
 
     /**
      * runtime 最终响应里的 finalText 是本轮权威正文。流式 callback 只负责实时体验，可能因为网络
-     * 抖动缺少分片；终态在这里覆盖校准同一条 chat_message，避免部分 callback 成功后留下残缺内容。
+     * 抖动缺少分片；调用方先关闭并排空 buffer，再一次性校准正文、保存 COMPLETED 并广播。
      */
-    private void reconcileFinalText(Invocation invocation, String finalText) {
-        if (chatThreadRepository == null
-                || chatMessageRepository == null
-                || finalText == null
-                || finalText.isBlank()) {
+    private void completeAssistantStream(Invocation invocation, String finalText) {
+        if (chatMessageRepository == null) {
             return;
         }
-        // 先把 callback 内存缓冲中的尾分片落库并移除 buffer，再用 finalText 覆盖。
-        // 顺序不能反过来，否则后续 drain 会用旧的累积正文覆盖权威终态。
-        if (assistantStreamBuffer != null) {
-            assistantStreamBuffer.drain(invocation.invocationId());
-        }
-        chatThreadRepository.findByTraceId(invocation.traceId()).ifPresent(thread -> {
-            ChatMessage existing = chatMessageRepository
-                    .findAssistantStreamByInvocationId(invocation.invocationId())
-                    .orElse(null);
-            if (existing != null && finalText.equals(existing.content())) {
+        ChatMessage existing = chatMessageRepository
+                .findAssistantStreamByInvocationId(invocation.invocationId())
+                .orElse(null);
+        boolean hasFinalText = finalText != null && !finalText.isBlank();
+        if (existing == null) {
+            if (!hasFinalText || chatThreadRepository == null) {
                 return;
             }
-            Instant now = Instant.now();
-            ChatMessage reconciled = existing == null
-                    ? new ChatMessage(
-                            "message-" + UUID.randomUUID(),
-                            thread.threadId(),
-                            ChatMessageRole.ASSISTANT,
-                            finalText,
-                            ChatMessageStatus.STREAMING,
-                            invocation.invocationId(),
-                            invocation.taskId(),
-                            invocation.agentId(),
-                            now,
-                            now)
-                    : new ChatMessage(
-                            existing.messageId(),
-                            existing.threadId(),
-                            existing.role(),
-                            finalText,
-                            ChatMessageStatus.STREAMING,
-                            existing.invocationId(),
-                            existing.taskId(),
-                            existing.agentId(),
-                            existing.createdAt(),
-                            now);
-            publishChatMessage(chatMessageRepository.save(reconciled));
-        });
+            chatThreadRepository.findByTraceId(invocation.traceId()).ifPresent(thread -> {
+                Instant now = Instant.now();
+                publishChatMessage(chatMessageRepository.save(new ChatMessage(
+                        "message-" + UUID.randomUUID(),
+                        thread.threadId(),
+                        ChatMessageRole.ASSISTANT,
+                        finalText,
+                        ChatMessageStatus.COMPLETED,
+                        invocation.invocationId(),
+                        invocation.taskId(),
+                        invocation.agentId(),
+                        now,
+                        now)));
+            });
+            return;
+        }
+        // 必须先检查保护状态，再校准正文，不能把 FAILED/CANCELED 重新打开为成功消息。
+        if (existing.status() == ChatMessageStatus.FAILED || existing.status() == ChatMessageStatus.CANCELED) {
+            return;
+        }
+        String content = hasFinalText ? finalText : existing.content();
+        if (existing.status() == ChatMessageStatus.COMPLETED && content.equals(existing.content())) {
+            return;
+        }
+        publishChatMessage(chatMessageRepository.save(new ChatMessage(
+                existing.messageId(),
+                existing.threadId(),
+                existing.role(),
+                content,
+                ChatMessageStatus.COMPLETED,
+                existing.invocationId(),
+                existing.taskId(),
+                existing.agentId(),
+                existing.createdAt(),
+                Instant.now())));
     }
 
     private void publishInvocationMessage(InvocationMessage message) {

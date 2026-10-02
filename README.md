@@ -233,7 +233,11 @@ successful response, without writing invocation events, chat messages, or realti
 The callback handler acquires the invocation stream lock before starting a fresh transaction
 and holds it through commit and after-commit broadcasts. Finalization waits for accepted
 callbacks, closes the callback entrance, and drains buffered text before reconciling the final
-answer or failure. The entrance stays closed while session compression keeps the invocation
+answer or failure. After the initial buffer drain, success reconciles the authoritative final text and
+sets `COMPLETED` in one message read/save/broadcast, without an intermediate `STREAMING` rewrite
+or another drain. Missing or blank final text retains the streamed body; existing `FAILED` or
+`CANCELED` messages are not overwritten, and an unchanged completed message is not republished.
+The entrance stays closed while session compression keeps the invocation
 `RUNNING`; compression itself does not hold the stream lock. Once a terminal status is durable,
 the in-memory closed marker is released and that status rejects later callbacks.
 This synchronization, like the stream buffer, is local to one platform-api process; it is not
