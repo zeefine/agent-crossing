@@ -12,6 +12,9 @@ public interface ChatMessageMapper {
 
     List<ChatMessage> findByThreadId(@Param("threadId") String threadId);
 
+    List<ChatMessage> findLatestAgentConclusions(@Param("threadId") String threadId,
+            @Param("excludedAgentId") String excludedAgentId, @Param("limit") int limit);
+
     List<ChatMessage> findVisibleMessagesAfterCursor(
             @Param("threadId") String threadId,
             @Param("currentAgentId") String currentAgentId,

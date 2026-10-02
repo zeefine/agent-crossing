@@ -166,6 +166,11 @@ class AssistantStreamBufferTests {
         }
 
         @Override
+        public List<ChatMessage> findLatestAgentConclusions(String threadId, String excludedAgentId, int limit) {
+            throw new UnsupportedOperationException("Stream buffer must not query planning summaries");
+        }
+
+        @Override
         public List<ChatMessage> findVisibleMessagesAfterCursor(
                 String threadId,
                 String currentAgentId,

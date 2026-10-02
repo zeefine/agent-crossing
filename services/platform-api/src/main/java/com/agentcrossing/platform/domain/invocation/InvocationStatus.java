@@ -16,5 +16,8 @@ public enum InvocationStatus {
     public String wireValue() {
         return wireValue;
     }
-}
 
+    public boolean isTerminal() {
+        return this == SUCCEEDED || this == FAILED || this == CANCELED;
+    }
+}

@@ -10,6 +10,7 @@ import com.agentcrossing.platform.domain.invocation.InvocationStatus;
 import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.domain.task.TaskRepository;
 import com.agentcrossing.platform.domain.task.TaskStatus;
+import com.agentcrossing.platform.domain.session.AgentSessionHistoryRepository;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -28,6 +29,7 @@ public class StartupTaskFailureService {
     private final InvocationRepository invocationRepository;
     private final ChatThreadRepository chatThreadRepository;
     private final ThreadStatusAggregator threadStatusAggregator;
+    private AgentSessionHistoryRepository sessionHistoryRepository;
 
     public StartupTaskFailureService(
             TaskRepository taskRepository,
@@ -70,6 +72,14 @@ public class StartupTaskFailureService {
     }
 
     StartupCleanupSummary failStaleWork() {
+        // This platform owns a single in-process scheduler. A restart interrupts every local compaction;
+        // rotation either committed atomically or left the original pointer and COMPACTING history intact.
+        if (sessionHistoryRepository != null) {
+            int restored = sessionHistoryRepository.restoreInterruptedCompactions();
+            if (restored > 0) {
+                log.warn("Restored interrupted session compactions on startup count={}", restored);
+            }
+        }
         Set<String> affectedTraceIds = new HashSet<>();
 
         int failedInvocations = failInvocations(affectedTraceIds);
@@ -77,6 +87,11 @@ public class StartupTaskFailureService {
         int failedThreads = failThreads(affectedTraceIds);
 
         return new StartupCleanupSummary(failedInvocations, failedTasks, failedThreads);
+    }
+
+    @Autowired
+    void setSessionHistoryRepository(AgentSessionHistoryRepository sessionHistoryRepository) {
+        this.sessionHistoryRepository = sessionHistoryRepository;
     }
 
     private int failInvocations(Set<String> affectedTraceIds) {

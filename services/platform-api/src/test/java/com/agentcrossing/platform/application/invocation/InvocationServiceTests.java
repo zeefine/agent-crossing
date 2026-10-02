@@ -29,10 +29,117 @@ import com.agentcrossing.platform.domain.task.TaskStatus;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class InvocationServiceTests {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void missingEventsFallBackToAssistantStream(boolean eventRepositoryAvailable) {
+        var messages = new InMemoryChatMessageRepository();
+        var events = eventRepositoryAvailable ? new InMemoryInvocationMessageRepository() : null;
+        var local = invocationService(runtimeClient, events, null, messages, null);
+        Boolean missing = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                local, "hasStreamedInvocationMessages", "inv");
+        assertThat(missing).isFalse();
+
+        messages.save(new ChatMessage("chat", "thread", ChatMessageRole.ASSISTANT, "stream",
+                ChatMessageStatus.STREAMING, "inv", "task", "codex", Instant.now(), Instant.now()));
+        Boolean found = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                local, "hasStreamedInvocationMessages", "inv");
+        assertThat(found).isTrue();
+    }
+
+    @Test
+    void missingOptionalRepositoriesMeanNoStreamedMessages() {
+        var local = invocationService(runtimeClient, null, null, null, null);
+        Boolean exists = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                local, "hasStreamedInvocationMessages", "inv");
+        assertThat(exists).isFalse();
+    }
+
+    @Test
+    void streamedMessageCheckDoesNotLoadEventBodies() {
+        var events = new InMemoryInvocationMessageRepository() {
+            @Override
+            public List<InvocationMessage> findByInvocationId(String invocationId) {
+                throw new AssertionError("Existence checks must not load event bodies");
+            }
+        };
+        events.save(new InvocationMessage("event", "user", "inv", "task", "trace", "codex",
+                AgentMessageType.MESSAGE, "content", Map.of("payload", "raw"), Instant.now()));
+        var local = invocationService(runtimeClient, events, null, null, null);
+
+        Boolean exists = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                local, "hasStreamedInvocationMessages", "inv");
+
+        assertThat(exists).isTrue();
+    }
+
+    @Test
+    void streamedEventHitSkipsAssistantStreamLookup() {
+        var events = new InMemoryInvocationMessageRepository();
+        events.save(new InvocationMessage("event", "user", "inv", "task", "trace", "codex",
+                AgentMessageType.MESSAGE, "content", null, Instant.now()));
+        var messages = new InMemoryChatMessageRepository() {
+            @Override
+            public Optional<ChatMessage> findAssistantStreamByInvocationId(String invocationId) {
+                throw new AssertionError("An event hit must short-circuit the chat lookup");
+            }
+        };
+        var local = invocationService(runtimeClient, events, null, messages, null);
+
+        Boolean exists = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                local, "hasStreamedInvocationMessages", "inv");
+
+        assertThat(exists).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellationAfterLastStatusReadCannotBeOverwritten(boolean runtimeFails) {
+        var invocations = new InMemoryInvocationRepository();
+        AtomicReference<String> runningId = new AtomicReference<>();
+        AtomicInteger reads = new AtomicInteger();
+        var tasks = new InMemoryTaskRepository() {
+            @Override
+            public Optional<Task> findByTaskId(String taskId) {
+                Optional<Task> snapshot = super.findByTaskId(taskId);
+                if (runningId.get() != null && reads.incrementAndGet() == (runtimeFails ? 1 : 2)) {
+                    // A stop commits after isCanceled has read both rows, but before the terminal write.
+                    invocations.updateStatus(runningId.get(), InvocationStatus.CANCELED);
+                    super.updateStatus(taskId, TaskStatus.CANCELED);
+                }
+                return snapshot;
+            }
+        };
+        Task task = task("race-task").withStatus(TaskStatus.PROCESSING);
+        tasks.save(task);
+        AgentRuntimeClient runtime = request -> {
+            runningId.set(request.invocationId());
+            if (runtimeFails) {
+                throw new IllegalStateException("late runtime failure");
+            }
+            return new AgentExecutionResult(List.of());
+        };
+        var local = new InvocationService(invocations, tasks, runtime, "http://unused", () -> {},
+                new InMemoryInvocationMessageRepository(), null, null, null, null, null,
+                new InMemoryTaskDependencyRepository(), null, null);
+
+        Invocation result = local.execute(task);
+
+        assertThat(result.status()).isEqualTo(InvocationStatus.CANCELED);
+        assertThat(invocations.findByInvocationId(result.invocationId()).orElseThrow().status())
+                .isEqualTo(InvocationStatus.CANCELED);
+        assertThat(tasks.findByTaskId(task.taskId()).orElseThrow().status()).isEqualTo(TaskStatus.CANCELED);
+    }
+
     private final InMemoryInvocationRepository invocationRepository = new InMemoryInvocationRepository();
     private final InMemoryTaskRepository taskRepository = new InMemoryTaskRepository();
     private final InMemoryTaskDependencyRepository taskDependencyRepository = new InMemoryTaskDependencyRepository();
@@ -105,6 +212,44 @@ class InvocationServiceTests {
                     assertThat(usage.contextInputTokens()).isEqualTo(18_000L);
                     assertThat(usage.usagePrecision()).isEqualTo(UsagePrecision.EXACT);
                     assertThat(usage.observedAt()).isEqualTo(observedAt);
+                });
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "EXACT,100000,900000,100000,EXACT",
+            "EXACT,800000,100000,800000,EXACT",
+            "EXACT,0,900000,0,EXACT",
+            "EXACT,,800000,800000,EXACT",
+            "EXACT,,,,UNKNOWN",
+            "TURN_AGGREGATE,,900000,,TURN_AGGREGATE",
+            "TURN_AGGREGATE,,,,TURN_AGGREGATE",
+            "ESTIMATED,900000,900000,,ESTIMATED",
+            "UNKNOWN,,900000,,UNKNOWN"
+    })
+    void persistsUsageWithoutConfusingAggregateAndReliableContext(
+            UsagePrecision precision, Long lastRequest, Long reportedContext,
+            Long expectedContext, UsagePrecision expectedPrecision) {
+        Task task = task("task-usage-precision");
+        taskRepository.save(task);
+        runtimeClient.result = new AgentExecutionResult(
+                List.of(), null, true, null, "prompt-v1",
+                new AgentExecutionUsage(
+                        "codex", "gpt-5.6", "session-123",
+                        900_000L, lastRequest, precision,
+                        900_000L, null, null, null, 100L, null, reportedContext,
+                        Map.of("input_tokens", 900_000L), "test", Instant.now()));
+
+        Invocation invocation = service.execute(task);
+
+        assertThat(invocation.status()).isEqualTo(InvocationStatus.SUCCEEDED);
+        assertThat(invocationUsageRepository.findByInvocationId(invocation.invocationId()))
+                .get().satisfies(usage -> {
+                    assertThat(usage.totalInputTokens()).isEqualTo(900_000L);
+                    assertThat(usage.inputTokens()).isEqualTo(900_000L);
+                    assertThat(usage.lastRequestInputTokens()).isEqualTo(lastRequest);
+                    assertThat(usage.contextInputTokens()).isEqualTo(expectedContext);
+                    assertThat(usage.usagePrecision()).isEqualTo(expectedPrecision);
                 });
     }
 

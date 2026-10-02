@@ -44,6 +44,52 @@
             updated_at = VALUES(updated_at)
     </insert>
 
+    <update id="updateStatusIfCurrent">
+        UPDATE task SET status = #{status}, updated_at = #{now, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
+        WHERE task_id = #{taskId}
+        AND status IN
+        <foreach collection="expected" item="state" open="(" separator="," close=")">#{state}</foreach>
+    </update>
+
+    <resultMap id="DispatchSnapshotResultMap" type="com.agentcrossing.platform.domain.task.TaskDispatchSnapshot">
+        <constructor>
+            <idArg column="task_id" javaType="java.lang.String"/>
+            <arg column="dependency_blocked" javaType="_boolean"/>
+            <arg column="dependency_waiting" javaType="_boolean"/>
+            <arg column="agent_busy" javaType="_boolean"/>
+            <arg column="session_compacting" javaType="_boolean"/>
+        </constructor>
+    </resultMap>
+
+    <select id="findDispatchSnapshots" resultMap="DispatchSnapshotResultMap">
+        SELECT candidate.task_id,
+            EXISTS (
+                SELECT 1 FROM task_dependency d LEFT JOIN task parent ON parent.task_id = d.parent_task_id
+                WHERE d.child_task_id = candidate.task_id
+                  AND (parent.task_id IS NULL OR parent.status IN ('FAILED', 'BLOCKED', 'CANCELED'))
+            ) AS dependency_blocked,
+            EXISTS (
+                SELECT 1 FROM task_dependency d JOIN task parent ON parent.task_id = d.parent_task_id
+                WHERE d.child_task_id = candidate.task_id AND parent.status != 'COMPLETED'
+            ) AS dependency_waiting,
+            (EXISTS (
+                SELECT 1 FROM invocation i WHERE i.user_id = candidate.user_id
+                  AND i.agent_id = candidate.agent_id AND i.status = 'RUNNING'
+            ) OR EXISTS (
+                SELECT 1 FROM task running WHERE running.user_id = candidate.user_id
+                  AND running.agent_id = candidate.agent_id AND running.status = 'PROCESSING'
+            )) AS agent_busy,
+            EXISTS (
+                SELECT 1 FROM chat_thread thread JOIN agent_session_history h
+                  ON h.thread_id = thread.thread_id AND h.user_id = thread.user_id
+                WHERE thread.trace_id = candidate.trace_id AND thread.user_id = candidate.user_id
+                  AND h.agent_id = candidate.agent_id AND h.provider = candidate.agent_id AND h.status = 'COMPACTING'
+            ) AS session_compacting
+        FROM task candidate
+        WHERE candidate.status = 'QUEUED' AND candidate.task_id IN
+        <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>
+    </select>
+
     <select id="findByTaskId" resultMap="TaskResultMap">
         SELECT * FROM task WHERE task_id = #{taskId}
     </select>
@@ -62,6 +108,26 @@
         SELECT * FROM task
         WHERE trace_id = #{traceId} AND user_id = #{userId}
         ORDER BY created_at ASC, task_id ASC
+    </select>
+
+    <resultMap id="TaskStatusCountResultMap" type="com.agentcrossing.platform.domain.task.TaskStatusCount">
+        <constructor>
+            <arg column="status" javaType="com.agentcrossing.platform.domain.task.TaskStatus"/>
+            <arg column="task_count" javaType="_long"/>
+        </constructor>
+    </resultMap>
+
+    <select id="countByStatusForTrace" resultMap="TaskStatusCountResultMap">
+        SELECT status, COUNT(*) AS task_count FROM task
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+        GROUP BY status
+    </select>
+
+    <select id="findRecentByTraceIdAndUserId" resultMap="TaskResultMap">
+        SELECT * FROM task
+        WHERE trace_id = #{traceId} AND user_id = #{userId}
+        ORDER BY updated_at DESC, created_at ASC, task_id ASC
+        LIMIT #{limit}
     </select>
 
     <select id="findByStatus" resultMap="TaskResultMap">

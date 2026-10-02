@@ -42,6 +42,15 @@
             completed_at = VALUES(completed_at)
     </insert>
 
+    <update id="updateStatusIfCurrent">
+        UPDATE invocation SET status = #{status},
+            started_at = CASE WHEN #{status} = 'RUNNING' THEN COALESCE(started_at, #{now, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}) ELSE started_at END,
+            completed_at = CASE WHEN #{status} IN ('SUCCEEDED', 'FAILED', 'CANCELED') THEN #{now, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler} ELSE completed_at END
+        WHERE invocation_id = #{invocationId}
+        AND status IN
+        <foreach collection="expected" item="state" open="(" separator="," close=")">#{state}</foreach>
+    </update>
+
     <select id="findByInvocationId" resultMap="InvocationResultMap">
         SELECT * FROM invocation WHERE invocation_id = #{invocationId}
     </select>

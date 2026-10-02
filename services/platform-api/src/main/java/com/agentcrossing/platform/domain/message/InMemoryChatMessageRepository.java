@@ -29,6 +29,20 @@ public class InMemoryChatMessageRepository implements ChatMessageRepository {
     }
 
     @Override
+    public List<ChatMessage> findLatestAgentConclusions(String threadId, String excludedAgentId, int limit) {
+        var latest = new java.util.LinkedHashMap<String, ChatMessage>();
+        messages.values().stream()
+                .filter(message -> message.threadId().equals(threadId))
+                .filter(message -> message.role() == ChatMessageRole.ASSISTANT
+                        && message.status() == ChatMessageStatus.COMPLETED)
+                .filter(message -> message.agentId() != null && !message.agentId().isBlank()
+                        && !message.agentId().equals(excludedAgentId))
+                .sorted(Comparator.comparing(ChatMessage::createdAt).reversed().thenComparing(ChatMessage::messageId))
+                .forEach(message -> latest.putIfAbsent(message.agentId(), message));
+        return latest.values().stream().limit(Math.max(0, limit)).toList();
+    }
+
+    @Override
     public List<ChatMessage> findVisibleMessagesAfterCursor(
             String threadId,
             String currentAgentId,

@@ -9,6 +9,10 @@ public interface ChatMessageRepository {
 
     List<ChatMessage> findByThreadId(String threadId);
 
+    /** Latest completed assistant message per nonblank agent, excluding the given agent.
+     * Ordered by createdAt DESC, messageId ASC; nonpositive limits return no rows. */
+    List<ChatMessage> findLatestAgentConclusions(String threadId, String excludedAgentId, int limit);
+
     List<ChatMessage> findVisibleMessagesAfterCursor(
             String threadId,
             String currentAgentId,

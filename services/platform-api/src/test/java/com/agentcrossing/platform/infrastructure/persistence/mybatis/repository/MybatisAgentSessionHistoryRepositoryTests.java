@@ -65,6 +65,16 @@ class MybatisAgentSessionHistoryRepositoryTests {
     }
 
     @Test
+    void readsCompactingHistoryAndRestoresInterruptedCompactions() {
+        AgentSessionHistory compacting = history().withStatus(AgentSessionHistoryStatus.COMPACTING);
+        when(mapper.findActive("user-1", "thread-1", "codex", "codex", "COMPACTING")).thenReturn(compacting);
+        when(mapper.restoreInterruptedCompactions()).thenReturn(1);
+
+        assertThat(repository.findCompacting("user-1", "thread-1", "codex", "codex")).contains(compacting);
+        assertThat(repository.restoreInterruptedCompactions()).isEqualTo(1);
+    }
+
+    @Test
     void doesNotHideConflictsOnOtherUniqueKeys() {
         AgentSessionHistory history = history();
         DuplicateKeyException conflict = new DuplicateKeyException("generation conflict");
@@ -97,6 +107,7 @@ class MybatisAgentSessionHistoryRepositoryTests {
         assertThat(configuration.hasStatement(namespace + ".findCreating")).isTrue();
         assertThat(configuration.hasStatement(namespace + ".findByThreadId")).isTrue();
         assertThat(configuration.hasStatement(namespace + ".deleteByThreadId")).isTrue();
+        assertThat(configuration.hasStatement(namespace + ".restoreInterruptedCompactions")).isTrue();
     }
 
     private static AgentSessionHistory history() {

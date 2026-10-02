@@ -7,6 +7,9 @@ public interface InvocationMessageRepository {
 
     boolean saveIfAbsent(InvocationMessage message);
 
+    /** Checks for any event without loading message bodies or raw payloads. */
+    boolean existsByInvocationId(String invocationId);
+
     List<InvocationMessage> findByInvocationId(String invocationId);
 
     List<InvocationMessage> findByTraceId(String traceId);

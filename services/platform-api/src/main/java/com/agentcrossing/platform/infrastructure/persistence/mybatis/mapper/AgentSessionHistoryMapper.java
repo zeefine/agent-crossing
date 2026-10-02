@@ -11,6 +11,8 @@ public interface AgentSessionHistoryMapper {
 
     void insert(AgentSessionHistory history);
 
+    int restoreInterruptedCompactions();
+
     AgentSessionHistory findBySessionRecordId(@Param("sessionRecordId") String sessionRecordId);
 
     AgentSessionHistory findByProviderSessionId(

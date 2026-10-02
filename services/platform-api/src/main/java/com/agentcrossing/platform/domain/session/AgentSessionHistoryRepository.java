@@ -17,6 +17,10 @@ public interface AgentSessionHistoryRepository {
 
     Optional<AgentSessionHistory> findCreating(String userId, String threadId, String agentId, String provider);
 
+    Optional<AgentSessionHistory> findCompacting(String userId, String threadId, String agentId, String provider);
+
+    int restoreInterruptedCompactions();
+
     List<AgentSessionHistory> findByThreadId(String userId, String threadId, String agentId, String provider);
 
     void deleteByThreadId(String userId, String threadId);

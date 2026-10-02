@@ -141,6 +141,10 @@
         ORDER BY generation ASC
     </select>
 
+    <update id="restoreInterruptedCompactions">
+        UPDATE agent_session_history SET status = 'ACTIVE' WHERE status = 'COMPACTING'
+    </update>
+
     <delete id="deleteByThreadId">
         DELETE FROM agent_session_history
         WHERE user_id = #{userId} AND thread_id = #{threadId}

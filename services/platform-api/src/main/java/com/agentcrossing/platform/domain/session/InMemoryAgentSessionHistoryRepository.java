@@ -67,6 +67,24 @@ public class InMemoryAgentSessionHistoryRepository implements AgentSessionHistor
     }
 
     @Override
+    public Optional<AgentSessionHistory> findCompacting(String userId, String threadId, String agentId, String provider) {
+        return histories.values().stream()
+                .filter(history -> sameSession(history, userId, threadId, agentId, provider))
+                .filter(history -> history.status() == AgentSessionHistoryStatus.COMPACTING)
+                .max(Comparator.comparingInt(AgentSessionHistory::generation));
+    }
+
+    @Override
+    public synchronized int restoreInterruptedCompactions() {
+        List<AgentSessionHistory> interrupted = histories.values().stream()
+                .filter(history -> history.status() == AgentSessionHistoryStatus.COMPACTING)
+                .toList();
+        interrupted.forEach(history -> histories.put(history.sessionRecordId(),
+                history.withStatus(AgentSessionHistoryStatus.ACTIVE)));
+        return interrupted.size();
+    }
+
+    @Override
     public List<AgentSessionHistory> findByThreadId(
             String userId, String threadId, String agentId, String provider) {
         return histories.values().stream()

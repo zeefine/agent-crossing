@@ -7,9 +7,12 @@ import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 import org.springframework.stereotype.Component;
 
 /**
@@ -23,11 +26,12 @@ import org.springframework.stereotype.Component;
  * <ul>
  *   <li>首个分片**总是**触发 INSERT（要先在 DB 落一行才有 messageId）</li>
  *   <li>中间分片若累积未达阈值，不写 DB，只返回内存 ChatMessage 供 WS push 用</li>
- *   <li>{@link #drain(String)} 由 invocation 完成 / 失败时调用，把还在内存里的尾巴强制 flush 到 DB 并清掉 buffer</li>
+ *   <li>{@link #closeCallbacksAndDrain(String)} 在最终收尾前关闭分片入口，把内存里的尾巴 flush 到 DB 并清掉 buffer</li>
  * </ul>
  *
- * <p>线程安全：{@link ConcurrentHashMap} 装 PendingFlush；每个 PendingFlush 内部用 synchronized 锁，
- * 同一 invocation 的并发 callback 串行化。不同 invocation 互不干扰。</p>
+ * <p>线程安全：固定数量的分段锁串行化同一 invocation 的回调事务与入口关闭操作。
+ * 回调必须先取锁再开启事务，持锁到提交完成；最终正文合并前关闭入口，摘要压缩不持锁。
+ * 终态落库后可以清除关闭标记，后续回调由持久化状态拒绝。锁仅在当前进程内生效。</p>
  *
  * <p>崩溃语义：platform-api crash 时所有未 flush 的 buffer 内容丢失——这是用户接受的 trade-off
  * （详见 docs 讨论）。重启后 DB 里看到最后一次 flush 的内容。</p>
@@ -39,9 +43,43 @@ public class AssistantStreamBuffer {
 
     private final ChatMessageRepository chatMessageRepository;
     private final ConcurrentMap<String, PendingFlush> buffers = new ConcurrentHashMap<>();
+    private final Set<String> closedCallbacks = ConcurrentHashMap.newKeySet();
+    private final ReentrantLock[] invocationLocks = new ReentrantLock[256];
 
     public AssistantStreamBuffer(ChatMessageRepository chatMessageRepository) {
         this.chatMessageRepository = chatMessageRepository;
+        for (int index = 0; index < invocationLocks.length; index++) {
+            invocationLocks[index] = new ReentrantLock();
+        }
+    }
+
+    /** Callers must start and commit callback transactions inside this boundary, not outside it. */
+    public <T> T withInvocationLock(String invocationId, Supplier<T> operation) {
+        ReentrantLock lock = invocationLocks[Math.floorMod(invocationId.hashCode(), invocationLocks.length)];
+        lock.lock();
+        try {
+            return operation.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public boolean callbacksClosed(String invocationId) {
+        return closedCallbacks.contains(invocationId);
+    }
+
+    /** Wait for accepted callbacks, then seal before final-text reconciliation or error handling. */
+    public void closeCallbacksAndDrain(String invocationId) {
+        withInvocationLock(invocationId, () -> {
+            closedCallbacks.add(invocationId);
+            drainLocked(invocationId);
+            return null;
+        });
+    }
+
+    /** Only release after the durable invocation is terminal (or deleted); its status then guards late calls. */
+    public void forgetClosedCallbacks(String invocationId) {
+        closedCallbacks.remove(invocationId);
     }
 
     /**
@@ -49,6 +87,15 @@ public class AssistantStreamBuffer {
      * 不管是否 flush，返回的 ChatMessage 都带最新内容，messageId 在首次写 DB 时分配后保持稳定。
      */
     public ChatMessage appendChunk(Invocation invocation, String threadId, String chunk) {
+        return withInvocationLock(invocation.invocationId(), () -> {
+            if (callbacksClosed(invocation.invocationId())) {
+                throw new IllegalStateException("Invocation stream is closed");
+            }
+            return appendChunkLocked(invocation, threadId, chunk);
+        });
+    }
+
+    private ChatMessage appendChunkLocked(Invocation invocation, String threadId, String chunk) {
         PendingFlush pending = buffers.computeIfAbsent(
                 invocation.invocationId(),
                 ignored -> new PendingFlush(threadId, invocation));
@@ -79,6 +126,13 @@ public class AssistantStreamBuffer {
      * <p>如果 buffer 不存在（callback 从未到达，纯 batch 路径），no-op。</p>
      */
     public void drain(String invocationId) {
+        withInvocationLock(invocationId, () -> {
+            drainLocked(invocationId);
+            return null;
+        });
+    }
+
+    private void drainLocked(String invocationId) {
         PendingFlush pending = buffers.remove(invocationId);
         if (pending == null) {
             return;

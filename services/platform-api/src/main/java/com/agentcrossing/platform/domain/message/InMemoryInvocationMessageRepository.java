@@ -41,6 +41,12 @@ public class InMemoryInvocationMessageRepository implements InvocationMessageRep
     }
 
     @Override
+    public boolean existsByInvocationId(String invocationId) {
+        return messages.values().stream()
+                .anyMatch(message -> message.invocationId().equals(invocationId));
+    }
+
+    @Override
     public List<InvocationMessage> findByInvocationId(String invocationId) {
         return messages.values().stream()
                 .filter(message -> message.invocationId().equals(invocationId))

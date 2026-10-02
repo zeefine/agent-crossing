@@ -10,7 +10,6 @@ import com.agentcrossing.platform.application.realtime.RealtimeEventTypes;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
-import com.agentcrossing.platform.domain.invocation.InvocationStatus;
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.InvocationMessage;
 import com.agentcrossing.platform.domain.message.InvocationMessageRepository;
@@ -20,7 +19,10 @@ import java.util.List;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,6 +37,7 @@ public class CallbackController {
     private final ChatThreadRepository chatThreadRepository;
     private final AssistantStreamBuffer assistantStreamBuffer;
     private final ChatEventService chatEventService;
+    private TransactionTemplate transactions;
 
     public CallbackController(
             InvocationRepository invocationRepository,
@@ -49,17 +52,30 @@ public class CallbackController {
         this.chatEventService = chatEventService;
     }
 
+    @Autowired(required = false)
+    void setTransactionManager(PlatformTransactionManager manager) {
+        transactions = new TransactionTemplate(manager);
+        transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    }
+
     @PostMapping("/messages")
-    @Transactional
     // 进入事务的写入：invocation_message INSERT（每分片）+ chat_message INSERT/UPDATE
     //（仅 AssistantStreamBuffer 达到 1KB 阈值或首次建流式消息时触发）。
     // realtime_event 走 publishTransient，不写 realtime_event 持久化行；事务 afterCommit 后才广播到实时通道。
     public ApiResponse<List<TaskResponse>> postMessage(@Valid @RequestBody CallbackMessageRequest request) {
+        // Acquire the stream lock before opening a snapshot; retain it through commit and afterCommit broadcasts.
+        return assistantStreamBuffer.withInvocationLock(request.invocationId(), () -> transactions == null
+                ? acceptMessage(request)
+                : transactions.execute(status -> acceptMessage(request)));
+    }
+
+    private ApiResponse<List<TaskResponse>> acceptMessage(CallbackMessageRequest request) {
         long startedAt = System.nanoTime();
         Invocation invocation = invocationRepository.findByInvocationId(request.invocationId())
                 .orElseThrow(() -> new IllegalArgumentException("Invocation not found: " + request.invocationId()));
-        if (invocation.status() == InvocationStatus.CANCELED) {
-            // 停止已落库后，CLI 可能仍在收尾并回写尾分片；这些内容不能复活已取消的任务。
+        if (invocation.status().isTerminal() || assistantStreamBuffer.callbacksClosed(invocation.invocationId())) {
+            // Final response may already be reconciled while session compression keeps invocation RUNNING.
+            // Acknowledge without writing events/messages or recreating a streaming buffer.
             return ApiResponse.ok(List.of());
         }
         saveAndPublishMessage(invocation, request);

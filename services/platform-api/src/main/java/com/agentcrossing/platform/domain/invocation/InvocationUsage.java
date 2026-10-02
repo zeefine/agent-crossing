@@ -17,7 +17,7 @@ public record InvocationUsage(
         Long cacheReadInputTokens,
         Long outputTokens,
         Long reasoningOutputTokens,
-        long contextInputTokens,
+        Long contextInputTokens,
         Object rawUsageJson,
         String providerCliVersion,
         Instant observedAt) {
@@ -38,8 +38,16 @@ public record InvocationUsage(
         requireNonNegative(cacheReadInputTokens, "cacheReadInputTokens");
         requireNonNegative(outputTokens, "outputTokens");
         requireNonNegative(reasoningOutputTokens, "reasoningOutputTokens");
-        if (contextInputTokens < 0) {
-            throw new IllegalArgumentException("contextInputTokens must not be negative");
+        requireNonNegative(contextInputTokens, "contextInputTokens");
+        // Enforce the same invariant for incoming runtime usage and legacy database rows.
+        // Aggregate input remains available for accounting, but cannot measure window occupancy.
+        if (usagePrecision == UsagePrecision.EXACT) {
+            contextInputTokens = lastRequestInputTokens != null ? lastRequestInputTokens : contextInputTokens;
+            if (contextInputTokens == null) {
+                usagePrecision = UsagePrecision.UNKNOWN;
+            }
+        } else {
+            contextInputTokens = null;
         }
     }
 

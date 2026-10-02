@@ -4,10 +4,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class InMemoryTaskRepositoryTests {
     private final InMemoryTaskRepository repository = new InMemoryTaskRepository();
+
+    @Test
+    void compareAndSetPreservesCanceledRecordAndNeverCreatesMissingTask() {
+        repository.save(task("task-1", "trace-1", TaskStatus.PROCESSING));
+        assertThat(repository.updateStatusIfCurrent("task-1", Set.of(TaskStatus.QUEUED, TaskStatus.PROCESSING), TaskStatus.CANCELED)).isTrue();
+        Task canceled = repository.findByTaskId("task-1").orElseThrow();
+
+        assertThat(repository.updateStatusIfCurrent("task-1", Set.of(TaskStatus.PROCESSING), TaskStatus.COMPLETED)).isFalse();
+        assertThat(repository.updateStatus("task-1", TaskStatus.COMPLETED)).isEqualTo(canceled);
+        assertThat(repository.updateStatusIfCurrent("missing", Set.of(TaskStatus.PROCESSING), TaskStatus.COMPLETED)).isFalse();
+        assertThat(repository.findByTaskId("missing")).isEmpty();
+    }
 
     @Test
     void savesAndFindsTasksByTaskIdTraceIdAndStatus() {

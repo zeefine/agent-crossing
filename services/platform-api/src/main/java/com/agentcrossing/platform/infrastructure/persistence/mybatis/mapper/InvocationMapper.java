@@ -2,12 +2,17 @@ package com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper;
 
 import com.agentcrossing.platform.domain.invocation.Invocation;
 import java.util.List;
+import java.util.Set;
+import java.time.Instant;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
 @Mapper
 public interface InvocationMapper {
     void upsert(Invocation invocation);
+
+    int updateStatusIfCurrent(@Param("invocationId") String invocationId, @Param("expected") Set<String> expected,
+            @Param("status") String status, @Param("now") Instant now);
 
     Invocation findByInvocationId(@Param("invocationId") String invocationId);
 

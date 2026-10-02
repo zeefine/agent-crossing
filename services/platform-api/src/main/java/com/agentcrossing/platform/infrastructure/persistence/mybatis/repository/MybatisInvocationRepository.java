@@ -6,6 +6,9 @@ import com.agentcrossing.platform.domain.invocation.InvocationStatus;
 import com.agentcrossing.platform.infrastructure.persistence.mybatis.mapper.InvocationMapper;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.time.Instant;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
@@ -63,9 +66,19 @@ public class MybatisInvocationRepository implements InvocationRepository {
     public Invocation updateStatus(String invocationId, InvocationStatus status) {
         Invocation existing = findByInvocationId(invocationId)
                 .orElseThrow(() -> new IllegalArgumentException("Invocation not found: " + invocationId));
-        Invocation updated = existing.withStatus(status);
-        invocationMapper.upsert(updated);
-        return updated;
+        if (existing.status() != InvocationStatus.CANCELED) {
+            updateStatusIfCurrent(invocationId, Set.of(existing.status()), status);
+        }
+        return findByInvocationId(invocationId).orElseThrow(() -> new IllegalArgumentException("Invocation not found: " + invocationId));
+    }
+
+    @Override
+    public boolean updateStatusIfCurrent(String invocationId, Set<InvocationStatus> expected, InvocationStatus status) {
+        if (expected.isEmpty()) {
+            return false;
+        }
+        return invocationMapper.updateStatusIfCurrent(invocationId,
+                expected.stream().map(Enum::name).collect(Collectors.toSet()), status.name(), Instant.now()) == 1;
     }
 
     @Override

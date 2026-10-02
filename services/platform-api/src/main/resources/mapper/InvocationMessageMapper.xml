@@ -58,6 +58,13 @@
         )
     </insert>
 
+    <select id="existsByInvocationId" resultType="boolean">
+        SELECT EXISTS (
+            SELECT 1 FROM invocation_message
+            WHERE invocation_id = #{invocationId}
+        )
+    </select>
+
     <select id="findByInvocationId" resultMap="InvocationMessageResultMap">
         SELECT message_id, user_id, invocation_id, task_id, trace_id, agent_id, type, content, raw_payload, sequence_no, created_at
         FROM invocation_message

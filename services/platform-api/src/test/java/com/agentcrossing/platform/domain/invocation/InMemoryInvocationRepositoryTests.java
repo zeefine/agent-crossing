@@ -4,10 +4,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class InMemoryInvocationRepositoryTests {
     private final InMemoryInvocationRepository repository = new InMemoryInvocationRepository();
+
+    @Test
+    void compareAndSetPreservesCanceledRecordAndNeverCreatesMissingInvocation() {
+        repository.save(invocation("invocation-1", "task-1"));
+        assertThat(repository.updateStatusIfCurrent("invocation-1", Set.of(InvocationStatus.QUEUED), InvocationStatus.RUNNING)).isTrue();
+        assertThat(repository.updateStatusIfCurrent("invocation-1", Set.of(InvocationStatus.RUNNING), InvocationStatus.CANCELED)).isTrue();
+        Invocation canceled = repository.findByInvocationId("invocation-1").orElseThrow();
+
+        assertThat(repository.updateStatusIfCurrent("invocation-1", Set.of(InvocationStatus.RUNNING), InvocationStatus.SUCCEEDED)).isFalse();
+        assertThat(repository.updateStatus("invocation-1", InvocationStatus.FAILED)).isEqualTo(canceled);
+        assertThat(repository.updateStatusIfCurrent("missing", Set.of(InvocationStatus.RUNNING), InvocationStatus.SUCCEEDED)).isFalse();
+        assertThat(repository.findByInvocationId("missing")).isEmpty();
+        assertThat(canceled.startedAt()).isNotNull();
+        assertThat(canceled.completedAt()).isNotNull();
+    }
 
     @Test
     void savesAndFindsInvocationsByInvocationIdAndTaskId() {

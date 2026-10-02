@@ -52,6 +52,10 @@ class MybatisInvocationUsageRepositoryTests {
         assertThat(configuration.hasStatement(namespace + ".upsert")).isTrue();
         assertThat(configuration.hasStatement(namespace + ".findByInvocationId")).isTrue();
         assertThat(configuration.hasStatement(namespace + ".deleteByInvocationIds")).isTrue();
+        assertThat(configuration.getResultMap(namespace + ".InvocationUsageResultMap")
+                .getConstructorResultMappings().stream()
+                .filter(mapping -> "context_input_tokens".equals(mapping.getColumn()))
+                .findFirst().orElseThrow().getJavaType()).isEqualTo(Long.class);
     }
 
     private static InvocationUsage usage() {

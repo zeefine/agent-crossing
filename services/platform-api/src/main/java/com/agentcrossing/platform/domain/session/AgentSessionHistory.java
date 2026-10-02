@@ -74,6 +74,15 @@ public record AgentSessionHistory(
                 createdAt, activatedAt, now);
     }
 
+    public AgentSessionHistory withStatus(AgentSessionHistoryStatus nextStatus) {
+        return new AgentSessionHistory(
+                sessionRecordId, userId, threadId, traceId, agentId, provider, providerSessionId,
+                generation, nextStatus, predecessorSessionRecordId,
+                startupSummary, compactedStartMessageId, compactedEndMessageId, keepTailFromMessageId,
+                summaryTokens, summaryModel, summaryPromptVersion, rotationReason, finalContextInputTokens,
+                createdAt, activatedAt, supersededAt);
+    }
+
     private static void requireNonNegative(Long value, String field) {
         if (value != null && value < 0) {
             throw new IllegalArgumentException(field + " must not be negative");

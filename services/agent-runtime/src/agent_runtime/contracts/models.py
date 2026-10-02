@@ -185,7 +185,10 @@ class AgentExecutionUsage(ContractModel):
     cache_read_input_tokens: int | None = Field(default=None, alias="cacheReadInputTokens")
     output_tokens: int | None = Field(default=None, alias="outputTokens")
     reasoning_output_tokens: int | None = Field(default=None, alias="reasoningOutputTokens")
-    context_input_tokens: int = Field(alias="contextInputTokens")
+    context_input_tokens: int | None = Field(
+        alias="contextInputTokens",
+        description="Reliable current request input length; null when only aggregate usage is available.",
+    )
     raw_usage_json: dict[str, Any] | None = Field(default=None, alias="rawUsageJson")
     provider_cli_version: str | None = Field(default=None, alias="providerCliVersion")
     observed_at: str = Field(alias="observedAt")

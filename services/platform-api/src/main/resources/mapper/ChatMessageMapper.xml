@@ -56,6 +56,23 @@
         ORDER BY created_at ASC, message_id ASC
     </select>
 
+    <select id="findLatestAgentConclusions" resultMap="ChatMessageResultMap">
+        <!-- Rank only IDs/timestamps, then fetch the bounded set of potentially large message bodies. -->
+        SELECT message.* FROM chat_message message JOIN (
+            SELECT message_id, created_at FROM (
+                SELECT message_id, created_at,
+                       ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY created_at DESC, message_id ASC) AS agent_rank
+                FROM chat_message
+                WHERE thread_id = #{threadId} AND role = 'ASSISTANT' AND status = 'COMPLETED'
+                  AND agent_id IS NOT NULL AND agent_id REGEXP '[^[:space:]]' AND agent_id != #{excludedAgentId}
+            ) ranked
+            WHERE agent_rank = 1
+            ORDER BY created_at DESC, message_id ASC
+            LIMIT #{limit}
+        ) latest ON latest.message_id = message.message_id
+        ORDER BY message.created_at DESC, message.message_id ASC
+    </select>
+
     <select id="findVisibleMessagesAfterCursor" resultMap="ChatMessageResultMap">
         <!-- 内层保留最新消息，外层恢复正序供 Prompt 注入。游标成功推进后，更旧的溢出消息会被丢弃。 -->
         SELECT recent_messages.*

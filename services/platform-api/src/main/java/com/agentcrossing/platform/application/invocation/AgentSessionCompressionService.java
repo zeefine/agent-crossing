@@ -17,16 +17,20 @@ import com.agentcrossing.platform.domain.task.TaskRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class AgentSessionCompressionService {
@@ -48,6 +52,7 @@ public class AgentSessionCompressionService {
     private final int maxTailMessages;
     private final int maxTailCharacters;
     private final String summaryModel;
+    private TransactionTemplate transactionTemplate;
 
     public AgentSessionCompressionService(
             ChatThreadRepository chatThreadRepository,
@@ -80,19 +85,52 @@ public class AgentSessionCompressionService {
         this.summaryModel = summaryModel;
     }
 
-    @Transactional
+    @Autowired(required = false)
+    void setTransactionManager(PlatformTransactionManager transactionManager) {
+        transactionTemplate = new TransactionTemplate(transactionManager);
+        transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    }
+
+    /** The session lock is acquired before the database snapshot and released only after commit. */
+    public AgentExecutionSnapshot prepareExecution(Task task, Supplier<AgentExecutionSnapshot> loader) {
+        String threadId = findThreadId(task);
+        if (threadId == null) {
+            return loader.get();
+        }
+        ReentrantLock lock = sessionLock(task.userId(), threadId, task.agentId(), task.agentId());
+        lock.lock();
+        try {
+            return inTransaction(() -> {
+                if (historyRepository.findCompacting(task.userId(), threadId, task.agentId(), task.agentId()).isPresent()) {
+                    throw new IllegalStateException("Agent session is still compacting");
+                }
+                return loader.get();
+            });
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Non-blocking scheduling check: never hold the global router lock while waiting for a summary. */
+    public boolean isCompacting(Task task) {
+        String threadId = findThreadId(task);
+        return threadId != null && historyRepository
+                .findCompacting(task.userId(), threadId, task.agentId(), task.agentId()).isPresent();
+    }
+
     public void rememberSession(Task task, String threadId, AgentSession session) {
         ReentrantLock lock = sessionLock(task.userId(), threadId, task.agentId(), session.provider());
         lock.lock();
         try {
-            // Keep the current-session pointer and its history transition in one transaction. In MySQL the
-            // upsert also serializes concurrent writers on the agent_session primary key across app instances.
-            AgentSession savedSession = agentSessionRepository.save(session);
-            if (!rememberHistory(task, threadId, savedSession)) {
-                // A call that started before compression may finish afterwards with the superseded provider
-                // session id. Do not let that stale completion reopen or activate the sealed session.
-                agentSessionRepository.delete(task.userId(), threadId, task.agentId(), session.provider());
-            }
+            inTransaction(() -> {
+                // The upsert serializes MySQL writers; commit both pointer and history before unlocking.
+                AgentSession savedSession = agentSessionRepository.save(session);
+                if (!rememberHistory(task, threadId, savedSession)) {
+                    agentSessionRepository.delete(task.userId(), threadId, task.agentId(), session.provider());
+                }
+                return null;
+            });
         } finally {
             lock.unlock();
         }
@@ -135,22 +173,21 @@ public class AgentSessionCompressionService {
         return true;
     }
 
-    @Transactional
     public void compactIfNeeded(Task task, InvocationUsage usage) {
         if (!shouldCompact(task, usage)) {
             return;
         }
-        String threadId = chatThreadRepository.findByTraceId(task.traceId())
-                .filter(thread -> thread.userId().equals(task.userId()))
-                .map(thread -> thread.threadId())
-                .orElse(null);
+        // REQUIRES_NEW only suspends a caller's transaction; its connection would still be held
+        // throughout the remote summary. Require the orchestrator to call after its transaction ends.
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Session compression must run outside a database transaction");
+        }
+        String threadId = findThreadId(task);
         if (threadId == null) {
             return;
         }
         ReentrantLock lock = sessionLock(task.userId(), threadId, task.agentId(), usage.provider());
-        if (!lock.tryLock()) {
-            return;
-        }
+        lock.lock();
         try {
             compact(task, threadId, usage);
         } finally {
@@ -159,15 +196,63 @@ public class AgentSessionCompressionService {
     }
 
     private void compact(Task task, String threadId, InvocationUsage usage) {
-        String provider = usage.provider();
-        if (historyRepository.findCreating(task.userId(), threadId, task.agentId(), provider).isPresent()) {
+        CompressionPlan plan = inTransaction(() -> prepareCompression(task, threadId, usage));
+        if (plan == null) {
             return;
+        }
+        try {
+            // COMPACTING is already committed; no database connection is held while calling the model.
+            SessionCompressionResult result = compressionClient.compress(plan.request());
+            String summary = toJson(result.startupSummary());
+            boolean rotated = inTransaction(() -> {
+                AgentSessionHistory current = historyRepository
+                        .findBySessionRecordId(plan.active().sessionRecordId()).orElse(null);
+                if (!plan.ownsReservation(current)) {
+                    return false; // The thread was deleted or the reserved generation/session changed.
+                }
+                Instant now = Instant.now();
+                AgentSessionHistory pending = new AgentSessionHistory(
+                        "session-record-" + UUID.randomUUID(), task.userId(), threadId, task.traceId(), task.agentId(),
+                        usage.provider(), null, current.generation() + 1, AgentSessionHistoryStatus.CREATING,
+                        current.sessionRecordId(), summary, plan.compactedStartId(), plan.compactedEndId(),
+                        plan.tailFirstId(), null, summaryModel, result.summaryPromptVersion(),
+                        "TOKEN_THRESHOLD", null, now, null, null);
+                historyRepository.save(current.supersede(usage.contextInputTokens(), now));
+                historyRepository.save(pending);
+                agentSessionRepository.delete(task.userId(), threadId, task.agentId(), usage.provider());
+                return true;
+            });
+            if (rotated) {
+                log.info("Business session compressed userId={} threadId={} agentId={} generation={} contextTokens={}",
+                        task.userId(), threadId, task.agentId(), plan.active().generation() + 1, usage.contextInputTokens());
+            }
+        } catch (RuntimeException | Error failure) {
+            try {
+                inTransaction(() -> {
+                    historyRepository.findBySessionRecordId(plan.active().sessionRecordId())
+                            .filter(plan::ownsReservation)
+                            .ifPresent(history -> historyRepository.save(history.withStatus(AgentSessionHistoryStatus.ACTIVE)));
+                    return null;
+                });
+            } catch (RuntimeException | Error restoreFailure) {
+                failure.addSuppressed(restoreFailure);
+            }
+            throw failure;
+        }
+    }
+
+    private CompressionPlan prepareCompression(Task task, String threadId, InvocationUsage usage) {
+        String provider = usage.provider();
+        if (historyRepository.findCreating(task.userId(), threadId, task.agentId(), provider).isPresent()
+                || historyRepository.findCompacting(task.userId(), threadId, task.agentId(), provider).isPresent()) {
+            return null;
         }
         AgentSession currentSession = agentSessionRepository
                 .findByThreadId(task.userId(), threadId, task.agentId(), provider)
                 .orElse(null);
-        if (currentSession == null) {
-            return;
+        if (currentSession == null || (usage.providerSessionId() != null
+                && !usage.providerSessionId().equals(currentSession.providerSessionId()))) {
+            return null;
         }
         AgentSessionHistory active = historyRepository
                 .findActive(task.userId(), threadId, task.agentId(), provider)
@@ -179,7 +264,7 @@ public class AgentSessionCompressionService {
         int tailStart = tailStart(messages);
         int compactStart = indexAfter(messages, active.compactedEndMessageId());
         if (compactStart >= tailStart) {
-            return;
+            return null;
         }
         List<ChatMessage> compacted = messages.subList(compactStart, tailStart);
         List<SessionCompressionRequest.CompressionMessage> compressionMessages = compacted.stream()
@@ -190,33 +275,45 @@ public class AgentSessionCompressionService {
         List<SessionCompressionRequest.CompressionTask> tasks = taskRepository
                 .findByTraceIdAndUserId(task.traceId(), task.userId()).stream()
                 .map(item -> new SessionCompressionRequest.CompressionTask(
-                        item.taskId(), item.agentId(), item.status().name(), item.context()))
+                        item.taskId(), item.agentId(),
+                        item.taskId().equals(task.taskId()) ? "COMPLETED" : item.status().name(), item.context()))
                 .toList();
-        SessionCompressionResult result = compressionClient.compress(new SessionCompressionRequest(
+        SessionCompressionRequest request = new SessionCompressionRequest(
                 task.userId(), threadId, task.traceId(), task.agentId(), provider,
-                active.generation() + 1, active.startupSummary(), compressionMessages, tasks));
-        String summary = toJson(result.startupSummary());
-        Instant now = Instant.now();
+                active.generation() + 1, active.startupSummary(), compressionMessages, tasks);
         ChatMessage tailFirst = tailStart < messages.size() ? messages.get(tailStart) : null;
-        AgentSessionHistory pending = new AgentSessionHistory(
-                "session-record-" + UUID.randomUUID(), task.userId(), threadId, task.traceId(), task.agentId(),
-                provider, null, active.generation() + 1, AgentSessionHistoryStatus.CREATING,
-                active.sessionRecordId(), summary, compacted.getFirst().messageId(), compacted.getLast().messageId(),
-                tailFirst == null ? null : tailFirst.messageId(), null, summaryModel,
-                result.summaryPromptVersion(), "TOKEN_THRESHOLD", null, now, null, null);
-        historyRepository.save(active.supersede(usage.contextInputTokens(), now));
-        historyRepository.save(pending);
-        agentSessionRepository.delete(task.userId(), threadId, task.agentId(), provider);
-        log.info("Business session compressed userId={} threadId={} agentId={} generation={} contextTokens={}",
-                task.userId(), threadId, task.agentId(), pending.generation(), usage.contextInputTokens());
+        historyRepository.save(active.withStatus(AgentSessionHistoryStatus.COMPACTING));
+        return new CompressionPlan(active, request, compacted.getFirst().messageId(),
+                compacted.getLast().messageId(), tailFirst == null ? null : tailFirst.messageId());
+    }
+
+    private record CompressionPlan(AgentSessionHistory active, SessionCompressionRequest request,
+                                   String compactedStartId, String compactedEndId, String tailFirstId) {
+        boolean ownsReservation(AgentSessionHistory current) {
+            return current != null
+                    && current.status() == AgentSessionHistoryStatus.COMPACTING
+                    && current.sessionRecordId().equals(active.sessionRecordId())
+                    && current.generation() == active.generation()
+                    && current.providerSessionId().equals(active.providerSessionId());
+        }
+    }
+
+    private String findThreadId(Task task) {
+        return chatThreadRepository.findByTraceId(task.traceId())
+                .filter(thread -> thread.userId().equals(task.userId()))
+                .map(thread -> thread.threadId()).orElse(null);
+    }
+
+    private <T> T inTransaction(Supplier<T> action) {
+        return transactionTemplate == null ? action.get() : transactionTemplate.execute(status -> action.get());
     }
 
     private boolean shouldCompact(Task task, InvocationUsage usage) {
         return enabled
                 && BUSINESS_AGENTS.contains(task.agentId())
                 && usage != null
-                && usage.usagePrecision() != UsagePrecision.ESTIMATED
-                && usage.usagePrecision() != UsagePrecision.UNKNOWN
+                && usage.usagePrecision() == UsagePrecision.EXACT
+                && usage.contextInputTokens() != null
                 && usage.contextInputTokens() >= (long) Math.ceil(contextWindowTokens * triggerRatio);
     }
 

@@ -3,6 +3,8 @@ package com.agentcrossing.platform.domain.invocation;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -78,8 +80,21 @@ public class InMemoryInvocationRepository implements InvocationRepository {
             if (existing == null) {
                 throw new IllegalArgumentException("Invocation not found: " + invocationId);
             }
+            return existing.status() == InvocationStatus.CANCELED ? existing : existing.withStatus(status);
+        });
+    }
+
+    @Override
+    public boolean updateStatusIfCurrent(String invocationId, Set<InvocationStatus> expected, InvocationStatus status) {
+        AtomicBoolean changed = new AtomicBoolean();
+        invocations.computeIfPresent(invocationId, (ignored, existing) -> {
+            if (!expected.contains(existing.status())) {
+                return existing;
+            }
+            changed.set(true);
             return existing.withStatus(status);
         });
+        return changed.get();
     }
 
     @Override

@@ -189,6 +189,101 @@ npm run build
 
 ## Runtime Notes
 
+Invocation stream deduplication checks event existence with `SELECT EXISTS` without loading
+event bodies or raw payloads. A hit skips the assistant-stream lookup; a miss retains that fallback.
+The existing invocation-ID-leading index supports this query; no schema migration is required.
+
+### Bounded planning summaries and batched scheduling reads
+
+MasterAgent planning reads status counts grouped in MySQL, the 12 most recently updated tasks,
+and at most 6 latest completed business-agent conclusions (one per agent). The conclusion query
+ranks IDs/timestamps before loading message bodies. Task ordering is `updated_at DESC,
+created_at ASC, task_id ASC`; conclusion ordering is `created_at DESC, message_id ASC`, retaining
+the previous stable tie behavior. This changes internal summary reads, not public history endpoints.
+
+In MySQL mode, Router reads up to 128 queued IDs per scheduling query. The projection contains
+dependency failure/waiting, per-user agent busy state, and session `COMPACTING` state, without task
+context or message content. Queue order still decides dispatch, blocked descendants are revisited
+with a fresh snapshot, and a conditional `QUEUED` update must win before reservation or blocking.
+Snapshots are per scan, not a cross-request cache. Memory mode evaluates the same predicates locally.
+
+Regression fixtures guard the data-access budget: a summary over 200 tasks / 202 messages returns
+12 tasks + 6 conclusions + 1 status-count row instead of 402 full records; the extra aggregate
+query is intentional. A scan of 300 busy candidates with no dependencies uses 3 snapshot queries
+instead of per-candidate task, dependency, and running-invocation reads. These are deterministic
+repository/mapper test budgets, not measured production latency. MySQL `EXPLAIN ANALYZE` and load
+tests on representative data are still needed before claiming latency gains or adding indexes.
+
+### Cancellation and terminal execution states
+
+Runtime completion and user cancellation share a state-only transition boundary. MySQL writes use
+conditional updates against the expected active statuses (`PROCESSING` for Task, `RUNNING` for
+Invocation), updating Task before Invocation in a short transaction. A failed comparison rolls
+back the completion before reading the winning state again. The first committed terminal
+transition wins: late success/failure cannot overwrite `CANCELED`, and cancellation skips work
+that has already completed. Status updates never upsert a missing row. Memory mode coordinates
+completion/cancellation through the same repository monitor and uses atomic per-record comparisons.
+Task status events and runtime cancellation requests are sent after the state transaction commits; runtime
+execution and session compression do not hold that transaction open. No schema change is needed.
+
+### Late streaming callbacks
+
+Callbacks for `SUCCEEDED`, `FAILED`, or `CANCELED` invocations are acknowledged with an empty
+successful response, without writing invocation events, chat messages, or realtime updates.
+The callback handler acquires the invocation stream lock before starting a fresh transaction
+and holds it through commit and after-commit broadcasts. Finalization waits for accepted
+callbacks, closes the callback entrance, and drains buffered text before reconciling the final
+answer or failure. The entrance stays closed while session compression keeps the invocation
+`RUNNING`; compression itself does not hold the stream lock. Once a terminal status is durable,
+the in-memory closed marker is released and that status rejects later callbacks.
+This synchronization, like the stream buffer, is local to one platform-api process; it is not
+a multi-instance coordination mechanism. No database schema change is required.
+
+### Token usage and session compression
+
+`totalInputTokens` records aggregate input consumption for an invocation. Compression uses only
+`EXACT` usage with a known `contextInputTokens`, preferring `lastRequestInputTokens` when supplied.
+The default threshold is 800,000 tokens (80% of the configured 1,000,000-token window).
+Aggregate CLI usage alone is recorded as `TURN_AGGREGATE` with a null context length and does not
+trigger compression. Providers must report a reliable request/context length to enable this policy.
+
+The MySQL startup schema migration makes `invocation_usage.context_input_tokens` nullable and
+separates legacy aggregate values from reliable context lengths while preserving recorded totals.
+Deploy the platform-api/schema update before the runtime update, since older consumers require a
+non-null context length.
+
+During compression, the completed agent execution retains its `RUNNING` invocation / `PROCESSING`
+task reservation, and its session history is committed as `COMPACTING` before requesting a summary.
+The router skips that session even if the task is canceled. Successful compression atomically
+archives the old history, saves a `CREATING` generation with the summary, and removes the old
+session pointer; a failed summary restores `ACTIVE` and keeps the old session available.
+Execution reads the session pointer and its context under the same session lock and database
+snapshot, with rotation commits completed before the lock is released. Compression uses a short
+reservation transaction, a remote summary call with no database transaction/connection held, and
+a short rotation (or failure recovery) transaction. Rotation and recovery revalidate the reserved
+record ID, generation, provider session ID, and `COMPACTING` status; stale results cannot mutate a
+changed reservation. Eligible compression calls inside an existing transaction are rejected before
+reservation: suspending an outer transaction would still retain its connection during the model call.
+Callers must invoke compression after their transaction has ended.
+In the current single-platform-process deployment, startup restores
+interrupted `COMPACTING` histories to `ACTIVE`; this is not a distributed lease or multi-instance
+scheduling mechanism. The status column is already `VARCHAR`, so no table alteration is required.
+
+The summary CLI receives prompts over stdin, never as command-line arguments. Runtime settings
+`AGENT_RUNTIME_SESSION_COMPRESSION_MAX_INPUT_BYTES` (default 131,072) and
+`AGENT_RUNTIME_SESSION_COMPRESSION_MAX_SUMMARY_BYTES` (default 16,384) bound each complete UTF-8
+prompt and returned cumulative summary. The input budget includes instructions, JSON escaping,
+and the preceding batch's summary; it is a byte limit, not an exact model-token measurement.
+Short requests use one call. Long requests are consumed in ordered JSONL fragments, preferring
+record boundaries and splitting individual oversized records when necessary. Each call merges
+the next fragment into the cumulative summary; history is not silently truncated.
+`AGENT_RUNTIME_SESSION_COMPRESSION_MAX_BATCHES` (default 64) limits calls, and all batches share
+`AGENT_RUNTIME_MASTER_AGENT_TIMEOUT_SECONDS` (default 60), which should remain below the Java
+business HTTP timeout. Oversized summaries, exhausted budgets, or failed batches abort compression
+without returning a partial summary, so the platform retains the old session. Increase these
+budgets together when longer histories need more calls/time. Timeout or cancellation kills and
+reaps the active CLI child.
+
 ### OpenCode
 
 OpenCode is invoked through `opencode run <prompt>` for fresh sessions and `opencode -s <sessionId> run <prompt>` for reused sessions. Reused sessions may require `opencode export <sessionId>` recovery because OpenCode can write final content to the session without emitting it to the command line.

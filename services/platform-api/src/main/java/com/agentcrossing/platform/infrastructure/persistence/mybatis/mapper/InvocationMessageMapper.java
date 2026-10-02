@@ -11,6 +11,8 @@ public interface InvocationMessageMapper {
 
     int insertIgnore(InvocationMessage message);
 
+    boolean existsByInvocationId(@Param("invocationId") String invocationId);
+
     List<InvocationMessage> findByInvocationId(@Param("invocationId") String invocationId);
 
     List<InvocationMessage> findByTraceId(@Param("traceId") String traceId);

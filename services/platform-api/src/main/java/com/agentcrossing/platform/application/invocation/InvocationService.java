@@ -56,6 +56,7 @@ public class InvocationService {
     private final InvocationUsageRepository invocationUsageRepository;
     private final AgentSessionCompressionService sessionCompressionService;
     private final ThreadStatusAggregator threadStatusAggregator;
+    private ExecutionStateService executionStateService;
 
     public InvocationService(
             InvocationRepository invocationRepository,
@@ -174,18 +175,31 @@ public class InvocationService {
         this.invocationUsageRepository = invocationUsageRepository;
         this.sessionCompressionService = sessionCompressionService;
         this.threadStatusAggregator = threadStatusAggregator;
+        this.executionStateService = new ExecutionStateService(taskRepository, invocationRepository);
+    }
+
+    @Autowired
+    void setExecutionStateService(ExecutionStateService executionStateService) {
+        this.executionStateService = executionStateService;
     }
 
     public Invocation execute(Task task) {
         // invocation 表示“某个 task 的一次 agent 执行”，重试时会创建新的 invocation。
         Invocation invocation = createInvocation(task);
-        // task.status 已经由 QuestRouterService.reserveForDispatch 置成 PROCESSING（并发了 task 事件）。
-        // 这里不再重复 UPDATE，避免每次 invocation 多一次 task UPDATE + 一次 realtime_event INSERT。
-        invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.RUNNING);
-
+        // Router 已预留 PROCESSING；启动时用条件更新确认状态，不能覆盖刚刚提交的取消。
         try {
-            AgentContextPack contextPack = buildContextPack(task);
-            AgentSession providerSession = findProviderSession(task);
+            ExecutionStateService.State started = executionStateService.start(task.taskId(), invocation.invocationId());
+            if (started.canceled()) {
+                return finishCanceledInvocation(invocation, task);
+            }
+            if (started.invocation().status() != InvocationStatus.RUNNING || started.task().status() != TaskStatus.PROCESSING) {
+                return started.invocation();
+            }
+            AgentExecutionSnapshot snapshot = sessionCompressionService == null
+                    ? loadExecutionSnapshot(task)
+                    : sessionCompressionService.prepareExecution(task, () -> loadExecutionSnapshot(task));
+            AgentContextPack contextPack = snapshot.contextPack();
+            AgentSession providerSession = snapshot.providerSession();
             long runtimeStartedAt = System.nanoTime();
             AgentExecutionResult result = agentRuntimeClient.execute(new AgentExecutionRequest(
                     invocation.invocationId(),
@@ -208,6 +222,7 @@ public class InvocationService {
                     task.agentId(),
                     result.messages().size());
             InvocationUsage invocationUsage = persistInvocationUsage(invocation, task, result);
+            closeCallbackStream(invocation.invocationId());
             if (isCanceled(invocation.invocationId(), task.taskId())) {
                 return finishCanceledInvocation(invocation, task);
             }
@@ -217,20 +232,39 @@ public class InvocationService {
             }
             rememberProviderSession(task, result);
             reconcileFinalText(invocation, result.finalText());
-            invocation = invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.SUCCEEDED);
-            Task completedTask = taskRepository.updateStatus(task.taskId(), TaskStatus.COMPLETED);
             markAssistantStreamFinal(invocation.invocationId(), ChatMessageStatus.COMPLETED, null);
-            publishTask(completedTask);
-            threadStatusAggregator.refreshForTrace(completedTask.userId(), completedTask.traceId());
             acknowledgeInjectedContext(task, contextPack);
             compactSessionIfNeeded(task, invocationUsage);
-            return invocation;
-        } catch (RuntimeException exception) {
+            // Keep the router's RUNNING/PROCESSING reservation until rotation has committed (or failed).
+            // The visible answer is already final and can be included in the compression snapshot above.
             if (isCanceled(invocation.invocationId(), task.taskId())) {
                 return finishCanceledInvocation(invocation, task);
             }
-            invocation = invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.FAILED);
-            Task failedTask = taskRepository.updateStatus(task.taskId(), TaskStatus.FAILED);
+            ExecutionStateService.State completed = executionStateService.finish(
+                    task.taskId(), invocation.invocationId(), InvocationStatus.SUCCEEDED);
+            if (completed.canceled()) {
+                return finishCanceledInvocation(invocation, task);
+            }
+            if (completed.changed()) {
+                publishTask(completed.task());
+                threadStatusAggregator.refreshForTrace(completed.task().userId(), completed.task().traceId());
+            }
+            return completed.invocation();
+        } catch (RuntimeException exception) {
+            closeCallbackStream(invocation.invocationId());
+            if (isCanceled(invocation.invocationId(), task.taskId())) {
+                return finishCanceledInvocation(invocation, task);
+            }
+            ExecutionStateService.State failed = executionStateService.finish(
+                    task.taskId(), invocation.invocationId(), InvocationStatus.FAILED);
+            if (failed.canceled()) {
+                return finishCanceledInvocation(invocation, task);
+            }
+            if (!failed.changed()) {
+                return failed.invocation();
+            }
+            invocation = failed.invocation();
+            Task failedTask = failed.task();
             publishTask(failedTask);
             // 若已存在流式 assistant 行则原地标记 FAILED 并追加异常信息，否则新开一行。
             String errorMessage = exception.getMessage();
@@ -253,13 +287,14 @@ public class InvocationService {
             threadStatusAggregator.refreshForTrace(failedTask.userId(), failedTask.traceId());
             return invocation;
         } finally {
+            releaseClosedCallbackStream(invocation.invocationId());
             taskDispatchSignal.signal();
         }
     }
 
     /**
      * A stop request updates persistence before the runtime is interrupted. Runtime HTTP can still return normally
-     * (or fail) afterwards, so both paths must re-read status before writing a terminal result.
+     * (or fail) afterwards. This check is only a fast path; conditional transactional writes decide the winner.
      */
     private boolean isCanceled(String invocationId, String taskId) {
         boolean invocationCanceled = invocationRepository.findByInvocationId(invocationId)
@@ -272,16 +307,42 @@ public class InvocationService {
     }
 
     private Invocation finishCanceledInvocation(Invocation invocation, Task task) {
-        Invocation canceled = invocationRepository.findByInvocationId(invocation.invocationId())
-                .filter(current -> current.status() == InvocationStatus.CANCELED)
-                .orElseGet(() -> invocationRepository.updateStatus(invocation.invocationId(), InvocationStatus.CANCELED));
-        Task canceledTask = taskRepository.findByTaskId(task.taskId())
-                .filter(current -> current.status() == TaskStatus.CANCELED)
-                .orElseGet(() -> taskRepository.updateStatus(task.taskId(), TaskStatus.CANCELED));
+        closeCallbackStream(invocation.invocationId());
+        ExecutionStateService.State state = executionStateService.reconcileCancellation(task.taskId(), invocation.invocationId());
+        if (!state.canceled()) {
+            return state.invocation();
+        }
+        Invocation canceled = state.invocation();
+        Task canceledTask = state.task();
         markAssistantStreamFinal(canceled.invocationId(), ChatMessageStatus.CANCELED, null);
         publishTask(canceledTask);
         threadStatusAggregator.refreshForTrace(canceledTask.userId(), canceledTask.traceId());
         return canceled;
+    }
+
+    private void closeCallbackStream(String invocationId) {
+        if (assistantStreamBuffer != null) {
+            assistantStreamBuffer.closeCallbacksAndDrain(invocationId);
+        }
+    }
+
+    private void releaseClosedCallbackStream(String invocationId) {
+        if (assistantStreamBuffer == null) {
+            return;
+        }
+        try {
+            assistantStreamBuffer.withInvocationLock(invocationId, () -> {
+                boolean terminalOrDeleted = invocationRepository.findByInvocationId(invocationId)
+                        .map(current -> current.status().isTerminal()).orElse(true);
+                if (terminalOrDeleted) {
+                    assistantStreamBuffer.forgetClosedCallbacks(invocationId);
+                }
+                return null;
+            });
+        } catch (RuntimeException exception) {
+            // Keep the closed gate if persistence is unavailable; never reopen an already finalized stream.
+            log.warn("Could not release closed callback stream invocationId={}", invocationId, exception);
+        }
     }
 
     private Invocation createInvocation(Task task) {
@@ -301,6 +362,10 @@ public class InvocationService {
 
     private AgentContextPack buildContextPack(Task task) {
         return agentContextService == null ? new AgentContextPack(List.of()) : agentContextService.buildContextPack(task);
+    }
+
+    private AgentExecutionSnapshot loadExecutionSnapshot(Task task) {
+        return new AgentExecutionSnapshot(buildContextPack(task), findProviderSession(task));
     }
 
     private void acknowledgeInjectedContext(Task task, AgentContextPack contextPack) {
@@ -381,15 +446,6 @@ public class InvocationService {
             return null;
         }
         AgentExecutionUsage usage = result.usage();
-        Long contextInputTokens = firstNonNull(
-                usage.contextInputTokens(), usage.lastRequestInputTokens(), usage.inputTokens());
-        if (contextInputTokens == null) {
-            log.warn(
-                    "Skipping invocation usage without context input tokens invocationId={} provider={}",
-                    invocation.invocationId(),
-                    usage.provider());
-            return null;
-        }
         String provider = nonBlankOrDefault(usage.provider(), providerFor(task));
         String model = nonBlankOrDefault(usage.model(), "unknown");
         String providerSessionId = nonBlankOrDefault(usage.providerSessionId(), result.providerSessionId());
@@ -408,7 +464,7 @@ public class InvocationService {
                     usage.cacheReadInputTokens(),
                     usage.outputTokens(),
                     usage.reasoningOutputTokens(),
-                    contextInputTokens,
+                    usage.contextInputTokens(),
                     usage.rawUsageJson(),
                     usage.providerCliVersion(),
                     usage.observedAt() == null ? Instant.now() : usage.observedAt()));
@@ -430,16 +486,6 @@ public class InvocationService {
             log.warn("Session compression failed after invocation taskId={} agentId={}",
                     task.taskId(), task.agentId(), exception);
         }
-    }
-
-    @SafeVarargs
-    private static <T> T firstNonNull(T... values) {
-        for (T value : values) {
-            if (value != null) {
-                return value;
-            }
-        }
-        return null;
     }
 
     private static String nonBlankOrDefault(String value, String fallback) {
@@ -488,11 +534,12 @@ public class InvocationService {
     }
 
     private boolean hasStreamedInvocationMessages(String invocationId) {
-        boolean hasInvocationEvents = invocationMessageRepository != null
-                && !invocationMessageRepository.findByInvocationId(invocationId).isEmpty();
-        boolean hasAssistantStream = chatMessageRepository != null
+        if (invocationMessageRepository != null
+                && invocationMessageRepository.existsByInvocationId(invocationId)) {
+            return true;
+        }
+        return chatMessageRepository != null
                 && chatMessageRepository.findAssistantStreamByInvocationId(invocationId).isPresent();
-        return hasInvocationEvents || hasAssistantStream;
     }
 
     private void saveAssistantMessage(

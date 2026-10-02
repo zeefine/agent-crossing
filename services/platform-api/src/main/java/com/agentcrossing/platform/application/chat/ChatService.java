@@ -29,7 +29,6 @@ import com.agentcrossing.platform.domain.task.TaskRepository;
 import com.agentcrossing.platform.domain.task.TaskStatus;
 import com.agentcrossing.platform.domain.user.UserRepository;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -409,7 +408,8 @@ public class ChatService {
     private void markActiveWorkCanceled(List<Task> traceTasks, String traceId, String userId) {
         traceTasks.stream()
                 .filter(task -> task.status() == TaskStatus.QUEUED || task.status() == TaskStatus.PROCESSING)
-                .forEach(task -> taskRepository.updateStatus(task.taskId(), TaskStatus.CANCELED));
+                .forEach(task -> taskRepository.updateStatusIfCurrent(task.taskId(),
+                        java.util.Set.of(TaskStatus.QUEUED, TaskStatus.PROCESSING), TaskStatus.CANCELED));
         if (invocationRepository == null) {
             return;
         }
@@ -417,7 +417,8 @@ public class ChatService {
                 .filter(invocation -> invocation.status() == InvocationStatus.QUEUED
                         || invocation.status() == InvocationStatus.RUNNING)
                 .map(Invocation::invocationId)
-                .forEach(invocationId -> invocationRepository.updateStatus(invocationId, InvocationStatus.CANCELED));
+                .forEach(invocationId -> invocationRepository.updateStatusIfCurrent(invocationId,
+                        java.util.Set.of(InvocationStatus.QUEUED, InvocationStatus.RUNNING), InvocationStatus.CANCELED));
     }
 
     private void removeQueuedTasks(List<String> taskIds) {
@@ -623,14 +624,13 @@ public class ChatService {
     private ThreadExecutionSummary buildThreadExecutionSummary(ChatThread thread) {
         List<Task> tasks = taskRepository == null
                 ? List.of()
-                : taskRepository.findByTraceIdAndUserId(thread.traceId(), thread.userId());
+                : taskRepository.findRecentByTraceIdAndUserId(thread.traceId(), thread.userId(), MASTER_SUMMARY_TASK_LIMIT);
         Map<String, Integer> statusCounts = new LinkedHashMap<>();
-        for (Task task : tasks) {
-            statusCounts.merge(task.status().wireValue(), 1, Integer::sum);
+        if (taskRepository != null) {
+            taskRepository.countByStatusForTrace(thread.traceId(), thread.userId())
+                    .forEach(count -> statusCounts.put(count.status().wireValue(), Math.toIntExact(count.count())));
         }
         List<ThreadExecutionSummary.TaskSummary> recentTasks = tasks.stream()
-                .sorted(Comparator.comparing(Task::updatedAt).reversed())
-                .limit(MASTER_SUMMARY_TASK_LIMIT)
                 .map(task -> new ThreadExecutionSummary.TaskSummary(
                         task.taskId(),
                         task.agentId(),
@@ -638,18 +638,8 @@ public class ChatService {
                         compactText(task.context(), MASTER_SUMMARY_TASK_CONTEXT_CHARS),
                         task.updatedAt().toString()))
                 .toList();
-        Map<String, ChatMessage> latestConclusionByAgent = new LinkedHashMap<>();
-        chatMessageRepository
-                .findByThreadId(thread.threadId())
-                .stream()
-                .filter(message -> message.role() == ChatMessageRole.ASSISTANT)
-                .filter(message -> message.status() == ChatMessageStatus.COMPLETED)
-                .filter(message -> message.agentId() != null && !message.agentId().isBlank())
-                .filter(message -> !MASTER_AGENT_ID.equals(message.agentId()))
-                .sorted(Comparator.comparing(ChatMessage::createdAt).reversed())
-                .forEach(message -> latestConclusionByAgent.putIfAbsent(message.agentId(), message));
-        List<ThreadExecutionSummary.AgentConclusion> latestConclusions = latestConclusionByAgent.values().stream()
-                .limit(MASTER_SUMMARY_CONCLUSION_LIMIT)
+        List<ThreadExecutionSummary.AgentConclusion> latestConclusions = chatMessageRepository
+                .findLatestAgentConclusions(thread.threadId(), MASTER_AGENT_ID, MASTER_SUMMARY_CONCLUSION_LIMIT).stream()
                 .map(message -> new ThreadExecutionSummary.AgentConclusion(
                         message.agentId(),
                         message.taskId(),

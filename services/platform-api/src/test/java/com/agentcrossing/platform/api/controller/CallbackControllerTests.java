@@ -1,6 +1,9 @@
 package com.agentcrossing.platform.api.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.agentcrossing.platform.api.dto.CallbackMessageRequest;
 import com.agentcrossing.platform.api.dto.TaskResponse;
@@ -24,9 +27,82 @@ import com.agentcrossing.platform.domain.task.TaskStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
 
 class CallbackControllerTests {
+    @Test
+    void waitingCallbackStartsFreshTransactionOnlyAfterAcquiringStreamLock() throws Exception {
+        var invocations = new InMemoryInvocationRepository();
+        var messages = new InMemoryChatMessageRepository();
+        var events = new InMemoryInvocationMessageRepository();
+        var publisher = mock(ChatEventService.class);
+        var buffer = new AssistantStreamBuffer(messages);
+        var controller = new CallbackController(invocations, events, new InMemoryChatThreadRepository(), buffer, publisher);
+        Instant now = Instant.now();
+        invocations.save(new Invocation("inv", "user", "task", "trace", "codex", InvocationStatus.RUNNING, now, now, null));
+        AtomicInteger begins = new AtomicInteger();
+        controller.setTransactionManager(new AbstractPlatformTransactionManager() {
+            @Override protected Object doGetTransaction() { return new Object(); }
+            @Override protected void doBegin(Object transaction, TransactionDefinition definition) { begins.incrementAndGet(); }
+            @Override protected void doCommit(DefaultTransactionStatus status) {}
+            @Override protected void doRollback(DefaultTransactionStatus status) {}
+        });
+        try (var worker = Executors.newSingleThreadExecutor()) {
+            var callback = buffer.withInvocationLock("inv", () -> {
+                CountDownLatch started = new CountDownLatch(1);
+                var pending = worker.submit(() -> {
+                    started.countDown();
+                    return controller.postMessage(new CallbackMessageRequest("inv", "late"));
+                });
+                try {
+                    assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException exception) {
+                    throw new AssertionError(exception);
+                }
+                assertThatThrownBy(() -> pending.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+                assertThat(begins.get()).isZero();
+                invocations.updateStatus("inv", InvocationStatus.SUCCEEDED);
+                return pending;
+            });
+            assertThat(callback.get(3, TimeUnit.SECONDS).data()).isEmpty();
+        }
+        assertThat(begins.get()).isEqualTo(1);
+        assertThat(events.findByInvocationId("inv")).isEmpty();
+        verifyNoInteractions(publisher);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = InvocationStatus.class, names = {"SUCCEEDED", "FAILED", "CANCELED"})
+    void ignoresEveryTerminalInvocationWithoutCreatingMessagesOrPublishingEvents(InvocationStatus terminal) {
+        var invocations = new InMemoryInvocationRepository();
+        var threads = new InMemoryChatThreadRepository();
+        var messages = new InMemoryChatMessageRepository();
+        var events = new InMemoryInvocationMessageRepository();
+        var publisher = mock(ChatEventService.class);
+        Instant now = Instant.now();
+        invocations.save(new Invocation("inv", "user", "task", "trace", "codex", terminal, now, now, now));
+        threads.save(new ChatThread("thread", "user", "thread", ChatThreadStatus.COMPLETED, "trace", now, now));
+        var buffer = new AssistantStreamBuffer(messages);
+        var controller = new CallbackController(invocations, events, threads, buffer, publisher);
+
+        assertThat(controller.postMessage(new CallbackMessageRequest("inv", "late chunk", true, 99L)).data()).isEmpty();
+        buffer.drain("inv");
+
+        assertThat(events.findByInvocationId("inv")).isEmpty();
+        assertThat(messages.findByThreadId("thread")).isEmpty();
+        verifyNoInteractions(publisher);
+    }
+
     @Test
     void callbackMessageOnlyPersistsAndPublishesContentWithoutParsingTasks() {
         InMemoryInvocationRepository invocationRepository = new InMemoryInvocationRepository();

@@ -194,8 +194,8 @@ DEALLOCATE PREPARE ac_invocation_add_user_id_stmt;
 
 -- 每个 invocation 仅保存一条 Provider 最终聚合用量。
 -- total_input_tokens 用于累计消耗统计；last_request_input_tokens 用于上下文压缩判断。
--- usage_precision 标记 last_request_input_tokens 的可信粒度，例如 EXACT、TURN_AGGREGATE、
--- ESTIMATED 或 UNKNOWN。
+-- context_input_tokens 仅保存可靠的当前请求上下文长度，优先使用 last_request_input_tokens。
+-- usage_precision 为 EXACT 且上下文长度非 NULL 时才允许触发压缩；累计、估算、未知均不触发。
 CREATE TABLE IF NOT EXISTS invocation_usage (
     invocation_id VARCHAR(128) NOT NULL,
     provider VARCHAR(64) NOT NULL,
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS invocation_usage (
     cache_read_input_tokens BIGINT NULL,
     output_tokens BIGINT NULL,
     reasoning_output_tokens BIGINT NULL,
-    context_input_tokens BIGINT NOT NULL,
+    context_input_tokens BIGINT NULL,
     raw_usage_json JSON NULL,
     provider_cli_version VARCHAR(64) NULL,
     observed_at TIMESTAMP(3) NOT NULL,
@@ -267,9 +267,34 @@ PREPARE ac_iu_add_usage_precision_stmt FROM @ac_iu_add_usage_precision_sql;
 EXECUTE ac_iu_add_usage_precision_stmt;
 DEALLOCATE PREPARE ac_iu_add_usage_precision_stmt;
 
+-- 旧版本将累计消耗写入非空 context_input_tokens。仅在首次放宽该列约束时迁移，
+-- 保留旧累计值，避免后续启动把新的精确上下文长度回填成累计消耗。
+SET @ac_iu_context_not_nullable := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'invocation_usage'
+      AND COLUMN_NAME = 'context_input_tokens'
+      AND IS_NULLABLE = 'NO'
+);
 UPDATE invocation_usage
 SET total_input_tokens = context_input_tokens
-WHERE total_input_tokens IS NULL;
+WHERE @ac_iu_context_not_nullable > 0 AND total_input_tokens IS NULL;
+
+SET @ac_iu_nullable_context_sql := IF(
+    @ac_iu_context_not_nullable > 0,
+    'ALTER TABLE invocation_usage MODIFY COLUMN context_input_tokens BIGINT NULL',
+    'SELECT 1'
+);
+PREPARE ac_iu_nullable_context_stmt FROM @ac_iu_nullable_context_sql;
+EXECUTE ac_iu_nullable_context_stmt;
+DEALLOCATE PREPARE ac_iu_nullable_context_stmt;
+
+UPDATE invocation_usage
+SET context_input_tokens = CASE
+    WHEN usage_precision = 'EXACT' THEN COALESCE(last_request_input_tokens, context_input_tokens)
+    ELSE NULL
+END
+WHERE @ac_iu_context_not_nullable > 0;
 
 CREATE TABLE IF NOT EXISTS chat_thread (
     thread_id VARCHAR(128) NOT NULL,

@@ -18,7 +18,7 @@
             <arg column="cache_read_input_tokens" javaType="java.lang.Long"/>
             <arg column="output_tokens" javaType="java.lang.Long"/>
             <arg column="reasoning_output_tokens" javaType="java.lang.Long"/>
-            <arg column="context_input_tokens" javaType="long"/>
+            <arg column="context_input_tokens" javaType="java.lang.Long"/>
             <arg column="raw_usage_json" javaType="java.lang.Object"
                  typeHandler="com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.ObjectJsonTypeHandler"/>
             <arg column="provider_cli_version" javaType="java.lang.String"/>

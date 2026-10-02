@@ -28,6 +28,11 @@ public class MybatisInvocationMessageRepository implements InvocationMessageRepo
     }
 
     @Override
+    public boolean existsByInvocationId(String invocationId) {
+        return invocationMessageMapper.existsByInvocationId(invocationId);
+    }
+
+    @Override
     public List<InvocationMessage> findByInvocationId(String invocationId) {
         return invocationMessageMapper.findByInvocationId(invocationId);
     }

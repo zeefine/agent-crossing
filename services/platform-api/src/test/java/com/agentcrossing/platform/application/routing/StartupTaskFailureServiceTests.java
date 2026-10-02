@@ -12,6 +12,9 @@ import com.agentcrossing.platform.domain.task.InMemoryTaskRepository;
 import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.domain.task.TaskSource;
 import com.agentcrossing.platform.domain.task.TaskStatus;
+import com.agentcrossing.platform.domain.session.AgentSessionHistory;
+import com.agentcrossing.platform.domain.session.AgentSessionHistoryStatus;
+import com.agentcrossing.platform.domain.session.InMemoryAgentSessionHistoryRepository;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
@@ -69,6 +72,28 @@ class StartupTaskFailureServiceTests {
         assertThat(summary.failedThreads()).isEqualTo(1);
         assertThat(chatThreadRepository.findByThreadId("thread-open-with-task").orElseThrow().status())
                 .isEqualTo(ChatThreadStatus.FAILED);
+    }
+
+    @Test
+    void restoresInterruptedCompactionWithoutChangingGenerationOrSummary() {
+        var histories = new InMemoryAgentSessionHistoryRepository();
+        Instant now = Instant.now();
+        histories.save(new AgentSessionHistory(
+                "session-record-1", "user-1", "thread-1", "trace-1", "codex", "codex", "old-session",
+                2, AgentSessionHistoryStatus.COMPACTING, "predecessor", "previous summary",
+                "message-1", "message-2", "message-3", null, "gpt-5.6", "v1", "TOKEN_THRESHOLD",
+                null, now, now, null));
+        service.setSessionHistoryRepository(histories);
+
+        service.failStaleWork();
+        service.failStaleWork();
+
+        assertThat(histories.findActive("user-1", "thread-1", "codex", "codex")).get().satisfies(history -> {
+            assertThat(history.generation()).isEqualTo(2);
+            assertThat(history.providerSessionId()).isEqualTo("old-session");
+            assertThat(history.startupSummary()).isEqualTo("previous summary");
+        });
+        assertThat(histories.findCompacting("user-1", "thread-1", "codex", "codex")).isEmpty();
     }
 
     private static ChatThread thread(String threadId, String traceId, ChatThreadStatus status) {

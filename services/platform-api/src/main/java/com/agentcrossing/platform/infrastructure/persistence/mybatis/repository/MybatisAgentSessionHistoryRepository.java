@@ -73,6 +73,18 @@ public class MybatisAgentSessionHistoryRepository implements AgentSessionHistory
     }
 
     @Override
+    public Optional<AgentSessionHistory> findCompacting(
+            String userId, String threadId, String agentId, String provider) {
+        return Optional.ofNullable(agentSessionHistoryMapper.findActive(
+                userId, threadId, agentId, provider, AgentSessionHistoryStatus.COMPACTING.name()));
+    }
+
+    @Override
+    public int restoreInterruptedCompactions() {
+        return agentSessionHistoryMapper.restoreInterruptedCompactions();
+    }
+
+    @Override
     public List<AgentSessionHistory> findByThreadId(
             String userId, String threadId, String agentId, String provider) {
         if (threadId == null || threadId.isBlank()) {

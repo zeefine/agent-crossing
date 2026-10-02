@@ -42,20 +42,25 @@ def normalize_cli_usage(
         "context_input_tokens",
         "contextInputTokens",
     )
-    if context_input_tokens is None:
-        context_input_tokens = _provider_context_input_tokens(
-            provider,
-            input_tokens,
-            cached_input_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-        )
-    if context_input_tokens is None:
-        return None
+    # Only explicitly reported request/context counts measure window occupancy.
+    # Final CLI input_tokens can accumulate multiple model requests in one turn.
+    if last_request_input_tokens is not None:
+        context_input_tokens = last_request_input_tokens
 
     total_input_tokens = _integer(raw_usage, "total_input_tokens", "totalInputTokens")
     if total_input_tokens is None:
-        total_input_tokens = context_input_tokens
+        total_input_tokens = _provider_total_input_tokens(
+            provider,
+            input_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
+    if context_input_tokens is not None:
+        precision = "EXACT"
+    elif total_input_tokens is not None:
+        precision = "TURN_AGGREGATE"
+    else:
+        precision = "UNKNOWN"
     model = _model(event, configured_model)
     return {
         "provider": provider,
@@ -63,7 +68,7 @@ def normalize_cli_usage(
         "providerSessionId": provider_session_id,
         "totalInputTokens": total_input_tokens,
         "lastRequestInputTokens": last_request_input_tokens,
-        "usagePrecision": "EXACT" if last_request_input_tokens is not None else "TURN_AGGREGATE",
+        "usagePrecision": precision,
         "inputTokens": input_tokens,
         "cachedInputTokens": cached_input_tokens,
         "cacheCreationInputTokens": cache_creation_input_tokens,
@@ -77,18 +82,17 @@ def normalize_cli_usage(
     }
 
 
-def _provider_context_input_tokens(
+def _provider_total_input_tokens(
     provider: str,
     input_tokens: int | None,
-    cached_input_tokens: int | None,
     cache_creation_input_tokens: int | None,
     cache_read_input_tokens: int | None,
 ) -> int | None:
     if provider == "claudecode":
         values = (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
         return sum(value or 0 for value in values) if any(value is not None for value in values) else None
-    # Codex input_tokens already represents the full input; cached_input_tokens is a subset.
-    return input_tokens if input_tokens is not None else cached_input_tokens
+    # Cached input is a subset, not an alternative measure of total input.
+    return input_tokens
 
 
 def _model(event: dict[str, Any], configured_model: str | None) -> str:

@@ -113,8 +113,9 @@ def test_runtime_service_exposes_usage_from_done_message() -> None:
                             "provider": "codex",
                             "model": "gpt-test",
                             "usagePrecision": "TURN_AGGREGATE",
+                            "totalInputTokens": 120,
                             "inputTokens": 120,
-                            "contextInputTokens": 120,
+                            "contextInputTokens": None,
                             "observedAt": "2026-08-13T03:00:00Z",
                         }
                     },
@@ -129,10 +130,12 @@ def test_runtime_service_exposes_usage_from_done_message() -> None:
 
     assert response.usage is not None
     assert response.usage.provider == "codex"
-    assert response.usage.context_input_tokens == 120
+    assert response.usage.total_input_tokens == 120
+    assert response.usage.context_input_tokens is None
 
 
-def test_runtime_schema_declares_the_full_usage_response_contract() -> None:
+@pytest.mark.parametrize("context_tokens", [100, None])
+def test_runtime_schema_declares_the_full_usage_response_contract(context_tokens: int | None) -> None:
     schema_path = Path(__file__).resolve().parents[3] / "contracts/schemas/runtime-event.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     response_schema = schema["$defs"]["AgentExecutionResponse"]
@@ -144,15 +147,15 @@ def test_runtime_schema_declares_the_full_usage_response_contract() -> None:
             model="gpt-5.6",
             providerSessionId="session-1",
             totalInputTokens=120,
-            lastRequestInputTokens=100,
-            usagePrecision="EXACT",
+            lastRequestInputTokens=context_tokens,
+            usagePrecision="EXACT" if context_tokens is not None else "TURN_AGGREGATE",
             inputTokens=120,
             cachedInputTokens=80,
             cacheCreationInputTokens=0,
             cacheReadInputTokens=80,
             outputTokens=9,
             reasoningOutputTokens=3,
-            contextInputTokens=100,
+            contextInputTokens=context_tokens,
             rawUsageJson={"usage": {"input_tokens": 120}},
             providerCliVersion="test",
             observedAt="2026-08-13T03:00:00Z",
@@ -163,6 +166,7 @@ def test_runtime_schema_declares_the_full_usage_response_contract() -> None:
     assert response_schema["properties"]["usage"]["anyOf"][0]["$ref"] == "#/$defs/AgentExecutionUsage"
     assert set(response["usage"]) <= set(usage_schema["properties"])
     assert set(usage_schema["required"]) <= set(response["usage"])
+    assert usage_schema["properties"]["contextInputTokens"]["type"] == ["integer", "null"]
 
 
 def test_business_prompt_reinjects_static_rules_summary_and_retained_tail() -> None:
@@ -331,7 +335,8 @@ def test_claudecode_provider_builds_stream_json_command_and_parses_events() -> N
     assert messages[0].content == "answer"
     assert messages[1].content == "tool_use:Read"
     assert messages[-1].raw["providerSessionId"] == "claude-session"
-    assert messages[-1].raw["usage"]["contextInputTokens"] == 150
+    assert messages[-1].raw["usage"]["totalInputTokens"] == 150
+    assert messages[-1].raw["usage"]["contextInputTokens"] is None
     assert messages[-1].raw["usage"]["usagePrecision"] == "TURN_AGGREGATE"
 
 
@@ -619,7 +624,9 @@ def test_codex_provider_builds_json_command_and_parses_completed_agent_message(t
     assert messages[0].content == "Codex answer"
     assert messages[-1].raw["providerSessionId"] == "codex-thread-1"
     assert messages[-1].raw["diagnostics"]["nonChatEventCount"] == 2
-    assert messages[-1].raw["usage"]["contextInputTokens"] == 120
+    assert messages[-1].raw["usage"]["totalInputTokens"] == 120
+    assert messages[-1].raw["usage"]["contextInputTokens"] is None
+    assert messages[-1].raw["usage"]["usagePrecision"] == "TURN_AGGREGATE"
     assert messages[-1].raw["usage"]["cachedInputTokens"] == 80
 
 

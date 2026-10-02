@@ -30,6 +30,11 @@ public class MybatisChatMessageRepository implements ChatMessageRepository {
     }
 
     @Override
+    public List<ChatMessage> findLatestAgentConclusions(String threadId, String excludedAgentId, int limit) {
+        return limit <= 0 ? List.of() : chatMessageMapper.findLatestAgentConclusions(threadId, excludedAgentId, limit);
+    }
+
+    @Override
     public List<ChatMessage> findVisibleMessagesAfterCursor(
             String threadId,
             String currentAgentId,

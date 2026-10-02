@@ -1,24 +1,32 @@
 package com.agentcrossing.platform.application.routing;
 
 import com.agentcrossing.platform.application.task.TaskEventService;
+import com.agentcrossing.platform.application.invocation.AgentSessionCompressionService;
 import com.agentcrossing.platform.domain.invocation.InvocationRepository;
 import com.agentcrossing.platform.domain.queue.QuestHub;
 import com.agentcrossing.platform.domain.task.Task;
 import com.agentcrossing.platform.domain.task.TaskDependencyRepository;
 import com.agentcrossing.platform.domain.task.TaskRepository;
 import com.agentcrossing.platform.domain.task.TaskStatus;
+import com.agentcrossing.platform.domain.task.TaskDispatchSnapshotRepository;
+import com.agentcrossing.platform.domain.task.TaskDispatchSnapshot;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Set;
 import java.time.Duration;
 import java.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 @Service
 public class QuestRouterService {
     private static final Logger log = LoggerFactory.getLogger(QuestRouterService.class);
+    private static final int SNAPSHOT_BATCH_SIZE = 128;
     private final Object routingLock = new Object();
     private final QuestHub questHub;
     private final TaskRepository taskRepository;
@@ -26,6 +34,13 @@ public class QuestRouterService {
     private final InvocationRepository invocationRepository;
     private final ParallelTaskWorker parallelTaskWorker;
     private final TaskEventService taskEventService;
+    private final AgentSessionCompressionService sessionCompressionService;
+    private TaskDispatchSnapshotRepository dispatchSnapshotRepository;
+
+    @Autowired(required = false)
+    void setDispatchSnapshotRepository(TaskDispatchSnapshotRepository repository) {
+        this.dispatchSnapshotRepository = repository;
+    }
 
     public QuestRouterService(
             QuestHub questHub,
@@ -34,12 +49,26 @@ public class QuestRouterService {
             InvocationRepository invocationRepository,
             ParallelTaskWorker parallelTaskWorker,
             TaskEventService taskEventService) {
+        this(questHub, taskRepository, taskDependencyRepository, invocationRepository,
+                parallelTaskWorker, taskEventService, null);
+    }
+
+    @Autowired
+    public QuestRouterService(
+            QuestHub questHub,
+            TaskRepository taskRepository,
+            TaskDependencyRepository taskDependencyRepository,
+            InvocationRepository invocationRepository,
+            ParallelTaskWorker parallelTaskWorker,
+            TaskEventService taskEventService,
+            AgentSessionCompressionService sessionCompressionService) {
         this.questHub = questHub;
         this.taskRepository = taskRepository;
         this.taskDependencyRepository = taskDependencyRepository;
         this.invocationRepository = invocationRepository;
         this.parallelTaskWorker = parallelTaskWorker;
         this.taskEventService = taskEventService;
+        this.sessionCompressionService = sessionCompressionService;
     }
 
     public Optional<Task> processNext() {
@@ -86,34 +115,63 @@ public class QuestRouterService {
             boolean changed;
             do {
                 changed = false;
-                for (String queuedTaskId : questHub.snapshot()) {
-                    Optional<Task> latestTask = findQueuedLatestTask(queuedTaskId);
-                    if (latestTask.isEmpty()) {
-                        questHub.remove(queuedTaskId);
+                List<String> queuedIds = questHub.snapshot();
+                for (int offset = 0; offset < queuedIds.size(); offset += SNAPSHOT_BATCH_SIZE) {
+                    List<String> batch = queuedIds.subList(offset, Math.min(offset + SNAPSHOT_BATCH_SIZE, queuedIds.size()));
+                    Map<String, TaskDispatchSnapshot> snapshots = loadDispatchSnapshots(batch);
+                    // Preserve queue order; storage results are intentionally unordered.
+                    for (String taskId : batch) {
+                        TaskDispatchSnapshot snapshot = snapshots.get(taskId);
+                        if (snapshot == null) {
+                            questHub.remove(taskId);
+                            changed = true;
+                            continue;
+                        }
+                        if (snapshot.dependencyBlocked()) {
+                            if (taskRepository.updateStatusIfCurrent(taskId, Set.of(TaskStatus.QUEUED), TaskStatus.BLOCKED)) {
+                                taskRepository.findByTaskId(taskId).ifPresent(blockedTasks::add);
+                            }
+                            questHub.remove(taskId);
+                            changed = true;
+                            continue;
+                        }
+                        if (snapshot.dependencyWaiting() || snapshot.agentBusy() || snapshot.sessionCompacting()) {
+                            continue;
+                        }
+                        // A snapshot is advice, not a claim: cancellation/deletion may have won since it was read.
+                        boolean reserved = taskRepository.updateStatusIfCurrent(taskId, Set.of(TaskStatus.QUEUED), TaskStatus.PROCESSING);
+                        questHub.remove(taskId);
                         changed = true;
-                        continue;
+                        if (reserved) {
+                            Optional<Task> task = taskRepository.findByTaskId(taskId)
+                                    .filter(current -> current.status() == TaskStatus.PROCESSING);
+                            if (task.isPresent()) {
+                                return new Acquisition(task, blockedTasks);
+                            }
+                        }
                     }
-
-                    Task task = latestTask.get();
-                    DependencyState dependencyState = dependencyState(task);
-                    if (dependencyState == DependencyState.BLOCKED) {
-                        questHub.remove(task.taskId());
-                        Task blocked = taskRepository.updateStatus(task.taskId(), TaskStatus.BLOCKED);
-                        blockedTasks.add(blocked);
-                        changed = true;
-                        continue;
-                    }
-                    if (dependencyState == DependencyState.WAITING || isAgentRunning(task)) {
-                        continue;
-                    }
-
-                    questHub.remove(task.taskId());
-                    Task reserved = taskRepository.updateStatus(task.taskId(), TaskStatus.PROCESSING);
-                    return new Acquisition(Optional.of(reserved), blockedTasks);
                 }
             } while (changed);
             return new Acquisition(Optional.empty(), blockedTasks);
         }
+    }
+
+    private Map<String, TaskDispatchSnapshot> loadDispatchSnapshots(List<String> taskIds) {
+        Map<String, TaskDispatchSnapshot> result = new HashMap<>();
+        if (dispatchSnapshotRepository != null) {
+            dispatchSnapshotRepository.findDispatchSnapshots(taskIds).forEach(snapshot -> result.put(snapshot.taskId(), snapshot));
+            return result;
+        }
+        // Memory storage has no SQL round trips; retain the same predicates for that implementation.
+        for (String taskId : taskIds) {
+            findQueuedLatestTask(taskId).ifPresent(task -> {
+                DependencyState dependency = dependencyState(task);
+                result.put(taskId, new TaskDispatchSnapshot(taskId, dependency == DependencyState.BLOCKED,
+                        dependency == DependencyState.WAITING, isAgentRunning(task),
+                        sessionCompressionService != null && sessionCompressionService.isCompacting(task)));
+            });
+        }
+        return result;
     }
 
     private Task requeueRejectedDispatch(Task task) {

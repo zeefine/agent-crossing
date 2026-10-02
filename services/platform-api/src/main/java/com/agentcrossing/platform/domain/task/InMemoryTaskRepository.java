@@ -3,6 +3,8 @@ package com.agentcrossing.platform.domain.task;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -46,6 +48,23 @@ public class InMemoryTaskRepository implements TaskRepository {
     }
 
     @Override
+    public List<TaskStatusCount> countByStatusForTrace(String traceId, String userId) {
+        var counts = tasks.values().stream()
+                .filter(task -> task.traceId().equals(traceId) && task.userId().equals(userId))
+                .collect(java.util.stream.Collectors.groupingBy(Task::status, java.util.stream.Collectors.counting()));
+        return counts.entrySet().stream().map(entry -> new TaskStatusCount(entry.getKey(), entry.getValue())).toList();
+    }
+
+    @Override
+    public List<Task> findRecentByTraceIdAndUserId(String traceId, String userId, int limit) {
+        return tasks.values().stream()
+                .filter(task -> task.traceId().equals(traceId) && task.userId().equals(userId))
+                .sorted(Comparator.comparing(Task::updatedAt).reversed()
+                        .thenComparing(Task::createdAt).thenComparing(Task::taskId))
+                .limit(Math.max(0, limit)).toList();
+    }
+
+    @Override
     public List<Task> findByStatus(TaskStatus status) {
         return tasks.values().stream()
                 .filter(task -> task.status() == status)
@@ -67,8 +86,21 @@ public class InMemoryTaskRepository implements TaskRepository {
             if (existing == null) {
                 throw new IllegalArgumentException("Task not found: " + taskId);
             }
+            return existing.status() == TaskStatus.CANCELED ? existing : existing.withStatus(status);
+        });
+    }
+
+    @Override
+    public boolean updateStatusIfCurrent(String taskId, Set<TaskStatus> expected, TaskStatus status) {
+        AtomicBoolean changed = new AtomicBoolean();
+        tasks.computeIfPresent(taskId, (ignored, existing) -> {
+            if (!expected.contains(existing.status())) {
+                return existing;
+            }
+            changed.set(true);
             return existing.withStatus(status);
         });
+        return changed.get();
     }
 
     @Override

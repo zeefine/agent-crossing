@@ -5,6 +5,8 @@ import java.time.Instant;
 
 /**
  * Token usage normalized by agent-runtime for one provider invocation.
+ * Aggregate consumption is stored in totalInputTokens; contextInputTokens is nullable when the
+ * current request length is unavailable. EXACT context uses lastRequestInputTokens first.
  *
  * <p>MODEL_SYNC(AgentExecutionUsage): keep this record aligned with
  * contracts/schemas/runtime-event.schema.json and agent_runtime.contracts.models.AgentExecutionUsage.

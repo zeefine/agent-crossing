@@ -121,10 +121,12 @@
         },
         "totalInputTokens": {
           "type": ["integer", "null"],
+          "description": "Aggregate input consumption for this invocation, independent of current context length.",
           "minimum": 0
         },
         "lastRequestInputTokens": {
           "type": ["integer", "null"],
+          "description": "Explicit last model request input length; takes precedence over contextInputTokens.",
           "minimum": 0
         },
         "usagePrecision": {
@@ -157,7 +159,8 @@
           "minimum": 0
         },
         "contextInputTokens": {
-          "type": "integer",
+          "type": ["integer", "null"],
+          "description": "Reliable current request input length. Null when only aggregate or unknown usage is available; never inferred from aggregate inputTokens.",
           "minimum": 0
         },
         "rawUsageJson": {
