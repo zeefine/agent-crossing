@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.invocation;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.agentcrossing.platform.application.chat.AssistantStreamBuffer;
@@ -128,7 +130,7 @@ class InvocationServiceTests {
             }
             return new AgentExecutionResult(List.of());
         };
-        var local = new InvocationService(invocations, tasks, runtime, "http://unused", () -> {},
+        var local = InvocationServiceTestFactory.create(invocations, tasks, runtime, "http://unused", () -> {},
                 new InMemoryInvocationMessageRepository(), null, null, null, null, null,
                 new InMemoryTaskDependencyRepository(), null, null);
 
@@ -442,7 +444,7 @@ class InvocationServiceTests {
                     true,
                     2L);
         };
-        InvocationService localService = new InvocationService(
+        InvocationService localService = InvocationServiceTestFactory.create(
                 invocationRepository,
                 taskRepository,
                 callbackThenReturnSameMessage,
@@ -823,7 +825,7 @@ class InvocationServiceTests {
             InMemoryChatMessageRepository messageRepository,
             AgentContextService agentContextService,
             InMemoryAgentSessionRepository agentSessionRepository) {
-        return new InvocationService(
+        return InvocationServiceTestFactory.create(
                 invocationRepository,
                 taskRepository,
                 runtimeClient,

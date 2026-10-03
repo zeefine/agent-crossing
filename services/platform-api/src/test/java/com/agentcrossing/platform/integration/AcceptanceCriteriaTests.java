@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.integration;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
@@ -188,7 +190,7 @@ class AcceptanceCriteriaTests {
                     taskDependencyRepository,
                     questHub,
                     new LoopGuardService(taskRepository));
-            InvocationService invocationService = new InvocationService(
+            InvocationService invocationService = InvocationServiceTestFactory.create(
                     invocationRepository,
                     taskRepository,
                     runtimeClient,

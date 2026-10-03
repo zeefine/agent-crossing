@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.chat;
 
+import com.agentcrossing.platform.support.ChatServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.agentcrossing.platform.TestAgentRegistries;
@@ -63,7 +65,7 @@ class ChatServiceTests {
             taskDependencyRepository,
             questHub,
             new LoopGuardService(taskRepository));
-    private final ChatService chatService = new ChatService(threadRepository, messageRepository, parserService);
+    private final ChatService chatService = ChatServiceTestFactory.create(threadRepository, messageRepository, parserService);
 
     @Test
     void submitsUserMessageBeforeSavingDirectAnswerAsynchronously() {
@@ -98,7 +100,7 @@ class ChatServiceTests {
                 localQuestHub,
                 new LoopGuardService(localTaskRepository));
         ExecutorService executor = Executors.newFixedThreadPool(2);
-        ChatService serialChatService = new ChatService(
+        ChatService serialChatService = ChatServiceTestFactory.create(
                 threadRepository,
                 messageRepository,
                 localParserService,
@@ -113,7 +115,7 @@ class ChatServiceTests {
                 null,
                 localQuestHub,
                 executor,
-                (org.springframework.transaction.support.TransactionTemplate) null);
+                (org.springframework.transaction.PlatformTransactionManager) null);
         ChatThread thread = serialChatService.createThread("user-1", "New chat");
 
         serialChatService.submitUserMessage("user-1", thread.threadId(), "第一条");
@@ -230,7 +232,7 @@ class ChatServiceTests {
                 null,
                 null,
                 agentSessionRepository);
-        ChatService sessionAwareChatService = new ChatService(threadRepository, messageRepository, sessionAwareParserService);
+        ChatService sessionAwareChatService = ChatServiceTestFactory.create(threadRepository, messageRepository, sessionAwareParserService);
         ChatThread thread = sessionAwareChatService.createThread("user-1", "New chat");
         Instant now = Instant.now();
         agentSessionRepository.save(new AgentSession(
@@ -291,7 +293,7 @@ class ChatServiceTests {
         InMemoryAgentSessionRepository agentSessionRepository = new InMemoryAgentSessionRepository();
         InMemoryEventLogRepository eventLogRepository = new InMemoryEventLogRepository();
         QuestHub questHub = new QuestHub();
-        ChatService cascadingChatService = new ChatService(
+        ChatService cascadingChatService = ChatServiceTestFactory.create(
                 threadRepository,
                 messageRepository,
                 parserService,
@@ -306,7 +308,7 @@ class ChatServiceTests {
                 agentSessionRepository,
                 questHub,
                 Runnable::run,
-                (org.springframework.transaction.support.TransactionTemplate) null);
+                (org.springframework.transaction.PlatformTransactionManager) null);
         cascadingChatService.setInvocationUsageRepository(invocationUsageRepository);
         ChatThread thread = cascadingChatService.createThread("user-1", "delete me");
         Instant now = Instant.now();
@@ -405,7 +407,7 @@ class ChatServiceTests {
     }
 
     private ChatService taskAwareChatService(QuestParserService service, Executor executor) {
-        return new ChatService(
+        return ChatServiceTestFactory.create(
                 threadRepository,
                 messageRepository,
                 service,
@@ -420,7 +422,7 @@ class ChatServiceTests {
                 null,
                 questHub,
                 executor,
-                (org.springframework.transaction.support.TransactionTemplate) null);
+                (org.springframework.transaction.PlatformTransactionManager) null);
     }
 
     private static final class FakeParserClient implements QuestParserClient {

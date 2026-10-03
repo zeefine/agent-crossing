@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.api.controller;
 
+import com.agentcrossing.platform.support.ChatServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.agentcrossing.platform.TestAgentRegistries;
@@ -51,7 +53,7 @@ class ChatControllerTests {
                 taskDependencyRepository,
                 questHub,
                 new LoopGuardService(taskRepository));
-        ChatService chatService = new ChatService(threadRepository, messageRepository, parserService, chatEventService);
+        ChatService chatService = ChatServiceTestFactory.create(threadRepository, messageRepository, parserService, chatEventService);
         controller = new ChatController(
                 chatService,
                 threadRepository,

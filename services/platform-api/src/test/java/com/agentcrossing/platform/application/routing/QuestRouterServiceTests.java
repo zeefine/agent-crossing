@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.routing;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
@@ -176,7 +178,7 @@ class QuestRouterServiceTests {
                 dependencyRepository,
                 questHub,
                 new LoopGuardService(taskRepository));
-        InvocationService invocationService = new InvocationService(
+        InvocationService invocationService = InvocationServiceTestFactory.create(
                 invocationRepository,
                 taskRepository,
                 runtimeClient,

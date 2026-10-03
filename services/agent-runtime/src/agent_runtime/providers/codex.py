@@ -8,7 +8,6 @@ from typing import Any
 
 from agent_runtime.business_prompt import business_prompt_composer
 from agent_runtime.callback.dispatcher import (
-    CallbackDeliverySummary,
     CallbackDispatcher,
     InvocationCallbackStream,
 )
@@ -17,22 +16,12 @@ from agent_runtime.contracts.models import AgentExecutionRequest, AgentMessage, 
 from agent_runtime.prompt_config import load_prompt_config
 from agent_runtime.prompt_session import annotate_prompt_version, prepare_execution_request
 from agent_runtime.providers.base import BaseProvider
+from agent_runtime.providers.cli_support import annotate_callback_summary, close_callback_stream, terminate_process
 from agent_runtime.providers.usage import normalize_cli_usage
 from agent_runtime.streaming.normalizer import AgentMessageNormalizer
 
 
 logger = logging.getLogger(__name__)
-
-
-async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:
-    if process is None or process.returncode is not None:
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(process.wait(), timeout=2)
-    except TimeoutError:
-        process.kill()
-        await process.wait()
 
 
 class CodexProvider(BaseProvider):
@@ -128,18 +117,18 @@ class CodexProvider(BaseProvider):
                 self._normalizer.done(request),
             ]
         except TimeoutError:
-            await _terminate_process(process)
+            await terminate_process(process)
             messages = [
                 self._normalizer.error(request, "Codex command timed out"),
                 self._normalizer.done(request),
             ]
         except asyncio.CancelledError:
-            await _terminate_process(process)
+            await terminate_process(process)
             raise
         finally:
-            summary = await self._close_callback_stream(request, callback_stream)
+            summary = await close_callback_stream(request.invocation_id, self._callback_streams, callback_stream)
 
-        self._annotate_callback_summary(messages, summary)
+        annotate_callback_summary(messages, summary)
         annotate_prompt_version(messages, prompt_version)
         return messages
 
@@ -339,30 +328,6 @@ class CodexProvider(BaseProvider):
         callback_stream = self._callback_streams.get(request.invocation_id)
         if callback_stream is not None:
             await callback_stream.publish(message.content)
-
-    async def _close_callback_stream(
-        self,
-        request: AgentExecutionRequest,
-        callback_stream: InvocationCallbackStream | None,
-    ) -> CallbackDeliverySummary:
-        self._callback_streams.pop(request.invocation_id, None)
-        if callback_stream is None:
-            return CallbackDeliverySummary(last_sequence=None, completed=False)
-        return await callback_stream.close()
-
-    @staticmethod
-    def _annotate_callback_summary(
-        messages: list[AgentMessage],
-        summary: CallbackDeliverySummary,
-    ) -> None:
-        for message in reversed(messages):
-            if message.type != AgentMessageType.DONE:
-                continue
-            raw = message.raw if isinstance(message.raw, dict) else {}
-            raw["callbackCompleted"] = summary.completed
-            raw["callbackLastSequence"] = summary.last_sequence
-            message.raw = raw
-            return
 
     @staticmethod
     def _parse_json_line(line: str) -> dict[str, Any] | None:

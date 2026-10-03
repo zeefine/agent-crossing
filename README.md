@@ -189,6 +189,13 @@ npm run build
 
 ## Runtime Notes
 
+`InvocationService`, `ThreadCancellationService`, and `ChatService` each have one production
+constructor. Execution and cancellation receive the same Spring-managed `ExecutionStateService`
+at construction; neither creates a temporary instance or replaces it through setter injection.
+Test-only factories under `src/test/java/.../support` supply synchronous execution, queues, status
+aggregation, and memory-mode state services. Spring still supplies the production executor and
+shared planning queue; transaction-manager availability remains optional in memory mode.
+
 Invocation stream deduplication checks event existence with `SELECT EXISTS` without loading
 event bodies or raw payloads. A hit skips the assistant-stream lookup; a miss retains that fallback.
 The existing invocation-ID-leading index supports this query; no schema migration is required.
@@ -289,6 +296,11 @@ budgets together when longer histories need more calls/time. Timeout or cancella
 reaps the active CLI child.
 
 ### OpenCode
+
+The three CLI adapters share process termination, callback-stream cleanup, and last-DONE delivery
+metadata helpers in `providers/cli_support.py`. Event parsing, tool-message filtering, and PTY
+handling remain provider-specific. Existing timeout policies are unchanged: the shared graceful
+termination helper is used only where the adapter previously used that same behavior.
 
 OpenCode is invoked through `opencode run <prompt>` for fresh sessions and `opencode -s <sessionId> run <prompt>` for reused sessions. Reused sessions may require `opencode export <sessionId>` recovery because OpenCode can write final content to the session without emitting it to the command line.
 

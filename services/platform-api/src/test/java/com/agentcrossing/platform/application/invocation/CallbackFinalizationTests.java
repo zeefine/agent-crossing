@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.invocation;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -174,7 +176,7 @@ class CallbackFinalizationTests {
             tasks.save(task);
             threads.save(new ChatThread("thread", "user", "thread", ChatThreadStatus.RUNNING, "trace", now, now));
             controller = new CallbackController(invocations, events, threads, buffer, publisher);
-            service = new InvocationService(invocations, tasks, request -> {
+            service = InvocationServiceTestFactory.create(invocations, tasks, request -> {
                 invocationId = request.invocationId();
                 runtimeStarted.countDown();
                 await(allowRuntimeReturn);

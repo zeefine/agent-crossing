@@ -2,7 +2,6 @@ package com.agentcrossing.platform.application.invocation;
 
 import com.agentcrossing.platform.application.chat.AssistantStreamBuffer;
 import com.agentcrossing.platform.application.chat.ChatEventService;
-import com.agentcrossing.platform.application.chat.ThreadPlanningQueue;
 import com.agentcrossing.platform.application.chat.ThreadStatusAggregator;
 import com.agentcrossing.platform.application.realtime.RealtimeEventTypes;
 import com.agentcrossing.platform.application.routing.TaskDispatchSignal;
@@ -31,7 +30,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -56,90 +54,8 @@ public class InvocationService {
     private final InvocationUsageRepository invocationUsageRepository;
     private final AgentSessionCompressionService sessionCompressionService;
     private final ThreadStatusAggregator threadStatusAggregator;
-    private ExecutionStateService executionStateService;
+    private final ExecutionStateService executionStateService;
 
-    public InvocationService(
-            InvocationRepository invocationRepository,
-            TaskRepository taskRepository,
-            AgentRuntimeClient agentRuntimeClient,
-            @Value("${agent-crossing.callback-base-url:http://127.0.0.1:8080/api/callback}") String callbackBaseUrl,
-            TaskDispatchSignal taskDispatchSignal,
-            InvocationMessageRepository invocationMessageRepository,
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
-            ChatEventService chatEventService,
-            TaskEventService taskEventService,
-            AssistantStreamBuffer assistantStreamBuffer,
-            TaskDependencyRepository taskDependencyRepository,
-            AgentContextService agentContextService,
-            AgentSessionRepository agentSessionRepository) {
-        this(
-                invocationRepository,
-                taskRepository,
-                agentRuntimeClient,
-                callbackBaseUrl,
-                taskDispatchSignal,
-                invocationMessageRepository,
-                chatThreadRepository,
-                chatMessageRepository,
-                chatEventService,
-                taskEventService,
-                assistantStreamBuffer,
-                taskDependencyRepository,
-                agentContextService,
-                agentSessionRepository,
-                null,
-                null,
-                new ThreadStatusAggregator(
-                        chatThreadRepository,
-                        taskRepository,
-                        invocationRepository,
-                        new ThreadPlanningQueue(Runnable::run),
-                        chatEventService));
-    }
-
-    public InvocationService(
-            InvocationRepository invocationRepository,
-            TaskRepository taskRepository,
-            AgentRuntimeClient agentRuntimeClient,
-            String callbackBaseUrl,
-            TaskDispatchSignal taskDispatchSignal,
-            InvocationMessageRepository invocationMessageRepository,
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
-            ChatEventService chatEventService,
-            TaskEventService taskEventService,
-            AssistantStreamBuffer assistantStreamBuffer,
-            TaskDependencyRepository taskDependencyRepository,
-            AgentContextService agentContextService,
-            AgentSessionRepository agentSessionRepository,
-            InvocationUsageRepository invocationUsageRepository) {
-        this(
-                invocationRepository,
-                taskRepository,
-                agentRuntimeClient,
-                callbackBaseUrl,
-                taskDispatchSignal,
-                invocationMessageRepository,
-                chatThreadRepository,
-                chatMessageRepository,
-                chatEventService,
-                taskEventService,
-                assistantStreamBuffer,
-                taskDependencyRepository,
-                agentContextService,
-                agentSessionRepository,
-                invocationUsageRepository,
-                null,
-                new ThreadStatusAggregator(
-                        chatThreadRepository,
-                        taskRepository,
-                        invocationRepository,
-                        new ThreadPlanningQueue(Runnable::run),
-                        chatEventService));
-    }
-
-    @Autowired
     public InvocationService(
             InvocationRepository invocationRepository,
             TaskRepository taskRepository,
@@ -157,7 +73,8 @@ public class InvocationService {
             AgentSessionRepository agentSessionRepository,
             InvocationUsageRepository invocationUsageRepository,
             AgentSessionCompressionService sessionCompressionService,
-            ThreadStatusAggregator threadStatusAggregator) {
+            ThreadStatusAggregator threadStatusAggregator,
+            ExecutionStateService executionStateService) {
         this.invocationRepository = invocationRepository;
         this.taskRepository = taskRepository;
         this.taskDependencyRepository = taskDependencyRepository;
@@ -175,12 +92,7 @@ public class InvocationService {
         this.invocationUsageRepository = invocationUsageRepository;
         this.sessionCompressionService = sessionCompressionService;
         this.threadStatusAggregator = threadStatusAggregator;
-        this.executionStateService = new ExecutionStateService(taskRepository, invocationRepository);
-    }
-
-    @Autowired
-    void setExecutionStateService(ExecutionStateService executionStateService) {
-        this.executionStateService = executionStateService;
+        this.executionStateService = java.util.Objects.requireNonNull(executionStateService, "executionStateService");
     }
 
     public Invocation execute(Task task) {
@@ -689,12 +601,6 @@ public class InvocationService {
     private void publishChatMessage(ChatMessage message) {
         if (chatEventService != null) {
             chatEventService.publish(message.threadId(), RealtimeEventTypes.CHAT_MESSAGE, message);
-        }
-    }
-
-    private void publishThread(com.agentcrossing.platform.domain.chat.ChatThread thread) {
-        if (chatEventService != null) {
-            chatEventService.publish(thread.threadId(), RealtimeEventTypes.THREAD, thread);
         }
     }
 

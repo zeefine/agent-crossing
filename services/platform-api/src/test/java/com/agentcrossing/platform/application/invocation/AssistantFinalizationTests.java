@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.invocation;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
@@ -203,7 +205,7 @@ class AssistantFinalizationTests {
             var events = new InMemoryInvocationMessageRepository();
             tasks.save(task);
             threads.save(new ChatThread("thread", "user", "thread", ChatThreadStatus.RUNNING, "trace", now, now));
-            service = new InvocationService(invocations, tasks, request -> {
+            service = InvocationServiceTestFactory.create(invocations, tasks, request -> {
                 Invocation invocation = invocations.findByInvocationId(request.invocationId()).orElseThrow();
                 events.save(new InvocationMessage("event", "user", invocation.invocationId(), "task", "trace",
                         "codex", AgentMessageType.MESSAGE, "partial", null, now));

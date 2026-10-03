@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.integration;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.agentcrossing.platform.TestAgentRegistries;
@@ -55,7 +57,7 @@ class IntegrationFlowTests {
             taskDependencyRepository,
             questHub,
             new LoopGuardService(taskRepository));
-    private final InvocationService invocationService = new InvocationService(
+    private final InvocationService invocationService = InvocationServiceTestFactory.create(
             invocationRepository,
             taskRepository,
             new FakeRuntimeClient(),
@@ -164,7 +166,7 @@ class IntegrationFlowTests {
                 new LoopGuardService(taskRepository),
                 com.agentcrossing.platform.application.routing.TaskDispatchSignal.NOOP,
                 taskEventService);
-        InvocationService invocationService = new InvocationService(
+        InvocationService invocationService = InvocationServiceTestFactory.create(
                 invocationRepository,
                 taskRepository,
                 new FakeRuntimeClient(),

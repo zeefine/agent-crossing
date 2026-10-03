@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.chat;
 
+import com.agentcrossing.platform.support.ChatServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
@@ -39,7 +41,7 @@ class ChatSummaryQueryTests {
     void boundedSummaryDoesNotLoadEntireTaskOrMessageHistory() {
         var tasks = spy(new InMemoryTaskRepository());
         var messages = spy(new InMemoryChatMessageRepository());
-        var service = new ChatService(new InMemoryChatThreadRepository(), messages, null);
+        var service = ChatServiceTestFactory.create(new InMemoryChatThreadRepository(), messages, null);
         ReflectionTestUtils.setField(service, "taskRepository", tasks);
         Instant base = Instant.parse("2026-01-01T00:00:00Z");
         var thread = new ChatThread("thread", "user", "title", ChatThreadStatus.RUNNING, "trace", base, base);

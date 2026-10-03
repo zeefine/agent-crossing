@@ -55,20 +55,6 @@ public record AgentExecutionResult(
         return builder.isEmpty() ? "Agent runtime returned an error" : builder.toString();
     }
 
-    public String aggregateOutput() {
-        StringBuilder builder = new StringBuilder();
-        for (AgentMessage message : messages) {
-            if ((message.type() == AgentMessageType.TEXT_DELTA || message.type() == AgentMessageType.MESSAGE)
-                    && message.content() != null) {
-                builder.append(message.content());
-                if (message.type() == AgentMessageType.MESSAGE) {
-                    builder.append('\n');
-                }
-            }
-        }
-        return builder.toString().trim();
-    }
-
     public String providerSessionId() {
         for (AgentMessage message : messages) {
             if (message.raw() instanceof Map<?, ?> raw) {

@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.invocation;
 
+import com.agentcrossing.platform.support.InvocationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
@@ -93,7 +95,7 @@ class SessionCompressionDispatchTests {
                 "user-1", "thread-1", "trace-1", "codex", "codex", "old-session", "v1", base, base));
         List<AgentExecutionRequest> requests = new ArrayList<>();
         AtomicInteger signals = new AtomicInteger();
-        var service = new InvocationService(
+        var service = InvocationServiceTestFactory.create(
                 invocations, tasks, request -> {
                     requests.add(request);
                     String sessionId = request.providerSessionId() == null ? "new-session" : request.providerSessionId();

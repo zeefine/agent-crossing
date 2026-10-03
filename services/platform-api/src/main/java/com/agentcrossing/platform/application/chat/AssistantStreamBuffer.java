@@ -99,24 +99,22 @@ public class AssistantStreamBuffer {
         PendingFlush pending = buffers.computeIfAbsent(
                 invocation.invocationId(),
                 ignored -> new PendingFlush(threadId, invocation));
-        synchronized (pending) {
-            pending.content.append(chunk);
-            pending.utf8BytesSinceLastWrite += chunk.getBytes(StandardCharsets.UTF_8).length;
+        pending.content.append(chunk);
+        pending.utf8BytesSinceLastWrite += chunk.getBytes(StandardCharsets.UTF_8).length;
 
-            boolean firstWrite = pending.messageId == null;
-            boolean overThreshold = pending.utf8BytesSinceLastWrite >= FLUSH_THRESHOLD_BYTES;
-            if (firstWrite || overThreshold) {
-                if (firstWrite) {
-                    pending.messageId = "message-" + UUID.randomUUID();
-                    pending.createdAt = Instant.now();
-                }
-                ChatMessage saved = chatMessageRepository.save(buildChatMessage(pending, invocation, ChatMessageStatus.STREAMING));
-                pending.utf8BytesSinceLastWrite = 0;
-                return saved;
+        boolean firstWrite = pending.messageId == null;
+        boolean overThreshold = pending.utf8BytesSinceLastWrite >= FLUSH_THRESHOLD_BYTES;
+        if (firstWrite || overThreshold) {
+            if (firstWrite) {
+                pending.messageId = "message-" + UUID.randomUUID();
+                pending.createdAt = Instant.now();
             }
-            // 未到阈值：不写 DB，构造一个内存 ChatMessage 让 WS push 携带最新累积内容。
-            return buildChatMessage(pending, invocation, ChatMessageStatus.STREAMING);
+            ChatMessage saved = chatMessageRepository.save(buildChatMessage(pending, invocation, ChatMessageStatus.STREAMING));
+            pending.utf8BytesSinceLastWrite = 0;
+            return saved;
         }
+        // 未到阈值：不写 DB，构造一个内存 ChatMessage 让 WS push 携带最新累积内容。
+        return buildChatMessage(pending, invocation, ChatMessageStatus.STREAMING);
     }
 
     /**
@@ -137,17 +135,15 @@ public class AssistantStreamBuffer {
         if (pending == null) {
             return;
         }
-        synchronized (pending) {
-            if (pending.messageId == null) {
-                // 还没收到过任何分片，没东西可 flush
-                return;
-            }
-            if (pending.utf8BytesSinceLastWrite == 0) {
-                // 上一次 flush 之后没新内容，DB 已经是最新
-                return;
-            }
-            chatMessageRepository.save(buildChatMessage(pending, null, ChatMessageStatus.STREAMING));
+        if (pending.messageId == null) {
+            // 还没收到过任何分片，没东西可 flush
+            return;
         }
+        if (pending.utf8BytesSinceLastWrite == 0) {
+            // 上一次 flush 之后没新内容，DB 已经是最新
+            return;
+        }
+        chatMessageRepository.save(buildChatMessage(pending, null, ChatMessageStatus.STREAMING));
     }
 
     private ChatMessage buildChatMessage(PendingFlush pending, Invocation invocation, ChatMessageStatus status) {
@@ -169,6 +165,7 @@ public class AssistantStreamBuffer {
                 now);
     }
 
+    /** All reads and writes are guarded by the invocation's segment lock. */
     private static final class PendingFlush {
         final String threadId;
         final String invocationId;

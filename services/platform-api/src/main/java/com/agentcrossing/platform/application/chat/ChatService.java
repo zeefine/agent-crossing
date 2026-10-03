@@ -79,54 +79,6 @@ public class ChatService {
     public ChatService(
             ChatThreadRepository chatThreadRepository,
             ChatMessageRepository chatMessageRepository,
-            QuestParserService questParserService) {
-        this(
-                chatThreadRepository,
-                chatMessageRepository,
-                questParserService,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                Runnable::run,
-                (TransactionTemplate) null);
-    }
-
-    public ChatService(
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
-            QuestParserService questParserService,
-            ChatEventService chatEventService) {
-        this(
-                chatThreadRepository,
-                chatMessageRepository,
-                questParserService,
-                chatEventService,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                Runnable::run,
-                (TransactionTemplate) null);
-    }
-
-    @Autowired
-    public ChatService(
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
             QuestParserService questParserService,
             ChatEventService chatEventService,
             EventLogRepository eventLogRepository,
@@ -143,123 +95,6 @@ public class ChatService {
             ThreadPlanningQueue threadPlanningQueue,
             ThreadStatusAggregator threadStatusAggregator,
             ObjectProvider<PlatformTransactionManager> transactionManagerProvider) {
-        this(
-                chatThreadRepository,
-                chatMessageRepository,
-                questParserService,
-                chatEventService,
-                eventLogRepository,
-                userRepository,
-                invocationMessageRepository,
-                invocationRepository,
-                taskRepository,
-                taskCreationRepository,
-                taskDependencyRepository,
-                agentContextCursorRepository,
-                agentSessionRepository,
-                questHub,
-                chatPlanningExecutor,
-                transactionManagerProvider.getIfAvailable() == null
-                        ? null
-                        : new TransactionTemplate(transactionManagerProvider.getIfAvailable()),
-                threadPlanningQueue,
-                threadStatusAggregator);
-    }
-
-    ChatService(
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
-            QuestParserService questParserService,
-            ChatEventService chatEventService,
-            EventLogRepository eventLogRepository,
-            UserRepository userRepository,
-            InvocationMessageRepository invocationMessageRepository,
-            InvocationRepository invocationRepository,
-            TaskRepository taskRepository,
-            TaskDependencyRepository taskDependencyRepository,
-            AgentContextCursorRepository agentContextCursorRepository,
-            AgentSessionRepository agentSessionRepository,
-            QuestHub questHub,
-            Executor chatPlanningExecutor,
-            TransactionTemplate transactionTemplate) {
-        this(
-                chatThreadRepository,
-                chatMessageRepository,
-                questParserService,
-                chatEventService,
-                eventLogRepository,
-                userRepository,
-                invocationMessageRepository,
-                invocationRepository,
-                taskRepository,
-                null,
-                taskDependencyRepository,
-                agentContextCursorRepository,
-                agentSessionRepository,
-                questHub,
-                chatPlanningExecutor,
-                transactionTemplate,
-                null,
-                null);
-    }
-
-    ChatService(
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
-            QuestParserService questParserService,
-            ChatEventService chatEventService,
-            EventLogRepository eventLogRepository,
-            UserRepository userRepository,
-            InvocationMessageRepository invocationMessageRepository,
-            InvocationRepository invocationRepository,
-            TaskRepository taskRepository,
-            TaskCreationRepository taskCreationRepository,
-            TaskDependencyRepository taskDependencyRepository,
-            AgentContextCursorRepository agentContextCursorRepository,
-            AgentSessionRepository agentSessionRepository,
-            QuestHub questHub,
-            Executor chatPlanningExecutor,
-            TransactionTemplate transactionTemplate) {
-        this(
-                chatThreadRepository,
-                chatMessageRepository,
-                questParserService,
-                chatEventService,
-                eventLogRepository,
-                userRepository,
-                invocationMessageRepository,
-                invocationRepository,
-                taskRepository,
-                taskCreationRepository,
-                taskDependencyRepository,
-                agentContextCursorRepository,
-                agentSessionRepository,
-                questHub,
-                chatPlanningExecutor,
-                transactionTemplate,
-                null,
-                null);
-    }
-
-    private ChatService(
-            ChatThreadRepository chatThreadRepository,
-            ChatMessageRepository chatMessageRepository,
-            QuestParserService questParserService,
-            ChatEventService chatEventService,
-            EventLogRepository eventLogRepository,
-            UserRepository userRepository,
-            InvocationMessageRepository invocationMessageRepository,
-            InvocationRepository invocationRepository,
-            TaskRepository taskRepository,
-            TaskCreationRepository taskCreationRepository,
-            TaskDependencyRepository taskDependencyRepository,
-            AgentContextCursorRepository agentContextCursorRepository,
-            AgentSessionRepository agentSessionRepository,
-            QuestHub questHub,
-            Executor chatPlanningExecutor,
-            TransactionTemplate transactionTemplate,
-            ThreadPlanningQueue threadPlanningQueue,
-            ThreadStatusAggregator threadStatusAggregator) {
         this.chatThreadRepository = chatThreadRepository;
         this.chatMessageRepository = chatMessageRepository;
         this.questParserService = questParserService;
@@ -275,18 +110,10 @@ public class ChatService {
         this.agentSessionRepository = agentSessionRepository;
         this.questHub = questHub;
         this.chatPlanningExecutor = chatPlanningExecutor;
-        this.threadPlanningQueue = threadPlanningQueue == null
-                ? new ThreadPlanningQueue(chatPlanningExecutor)
-                : threadPlanningQueue;
-        this.threadStatusAggregator = threadStatusAggregator == null
-                ? new ThreadStatusAggregator(
-                        chatThreadRepository,
-                        taskRepository,
-                        invocationRepository,
-                        this.threadPlanningQueue,
-                        chatEventService)
-                : threadStatusAggregator;
-        this.transactionTemplate = transactionTemplate;
+        this.threadPlanningQueue = java.util.Objects.requireNonNull(threadPlanningQueue, "threadPlanningQueue");
+        this.threadStatusAggregator = java.util.Objects.requireNonNull(threadStatusAggregator, "threadStatusAggregator");
+        PlatformTransactionManager manager = transactionManagerProvider.getIfAvailable();
+        this.transactionTemplate = manager == null ? null : new TransactionTemplate(manager);
     }
 
     @Autowired(required = false)

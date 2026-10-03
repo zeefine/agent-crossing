@@ -7,15 +7,12 @@ import com.agentcrossing.platform.application.task.TaskEventService;
 import com.agentcrossing.platform.domain.chat.ChatThread;
 import com.agentcrossing.platform.domain.chat.ChatThreadRepository;
 import com.agentcrossing.platform.domain.invocation.Invocation;
-import com.agentcrossing.platform.domain.invocation.InvocationRepository;
 import com.agentcrossing.platform.domain.queue.QuestHub;
 import com.agentcrossing.platform.domain.task.Task;
-import com.agentcrossing.platform.domain.task.TaskRepository;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * Owns user-initiated stop requests for a chat thread.
@@ -34,12 +31,11 @@ public class ThreadCancellationService {
     private final TaskEventService taskEventService;
     private final ThreadStatusAggregator threadStatusAggregator;
     private final TaskDispatchSignal taskDispatchSignal;
-    private ExecutionStateService executionStateService;
+    private final ExecutionStateService executionStateService;
 
     public ThreadCancellationService(
             ChatThreadRepository chatThreadRepository,
-            TaskRepository taskRepository,
-            InvocationRepository invocationRepository,
+            ExecutionStateService executionStateService,
             QuestHub questHub,
             ThreadPlanningQueue threadPlanningQueue,
             AgentRuntimeClient agentRuntimeClient,
@@ -53,12 +49,7 @@ public class ThreadCancellationService {
         this.taskEventService = taskEventService;
         this.threadStatusAggregator = threadStatusAggregator;
         this.taskDispatchSignal = taskDispatchSignal;
-        this.executionStateService = new ExecutionStateService(taskRepository, invocationRepository);
-    }
-
-    @Autowired
-    void setExecutionStateService(ExecutionStateService executionStateService) {
-        this.executionStateService = executionStateService;
+        this.executionStateService = java.util.Objects.requireNonNull(executionStateService, "executionStateService");
     }
 
     public CancelThreadWorkResult cancel(String userId, String threadId) {

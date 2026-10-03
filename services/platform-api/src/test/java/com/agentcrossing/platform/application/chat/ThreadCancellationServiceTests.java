@@ -1,5 +1,7 @@
 package com.agentcrossing.platform.application.chat;
 
+import com.agentcrossing.platform.support.ThreadCancellationServiceTestFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.agentcrossing.platform.application.invocation.AgentExecutionResult;
@@ -41,7 +43,7 @@ class ThreadCancellationServiceTests {
                 threadRepository, taskRepository, invocationRepository, planningQueue, chatEventService);
         TaskEventService taskEventService = new TaskEventService(threadRepository, chatEventService, dependencyRepository);
         CapturingRuntimeClient runtimeClient = new CapturingRuntimeClient(invocationRepository, taskRepository);
-        ThreadCancellationService service = new ThreadCancellationService(
+        ThreadCancellationService service = ThreadCancellationServiceTestFactory.create(
                 threadRepository,
                 taskRepository,
                 invocationRepository,
