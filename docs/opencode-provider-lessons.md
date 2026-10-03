@@ -2,7 +2,7 @@
 title: OpenCode Provider 踩坑清单
 doc_kind: ops-checklist
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-10-03
 status: active
 ---
 
@@ -23,8 +23,8 @@ Fresh session:
 
 1. runtime 执行 `opencode run <prompt>`。
 2. `run` 在 PTY 模式下可能直接输出模型 banner 和正文。
-3. 如果 `run` 输出里没有 sessionId，runtime 执行 `opencode session list` 发现最新 sessionId。
-4. Java 侧把 sessionId 写入 `agent_session`，键为 `userId + threadId + agentId + provider`。
+3. 仅从本次 `run` 的结构化 Session 元数据读取 sessionId；不从正文提取 `ses_...`，也不查询 `session list` 猜测归属。
+4. 有明确 sessionId 时 Java 才将其写入 `agent_session`，键为 `userId + threadId + agentId + provider`。没有 ID 时仍返回 stdout 正文，但不做 export 或保存可复用 Session；无正文则保留 `missing_session_id` 诊断。
 
 Reused session:
 
@@ -178,29 +178,23 @@ asyncio.create_subprocess_exec(..., stdout=PIPE, stderr=PIPE)
 
 **所有用于读取 OpenCode 终端输出的关键命令优先用 PTY**。手动命令能成功，只能证明 PTY/terminal 路径可用，不能证明 PIPE 路径可用。
 
-## 8. Pitfall 6：`opencode session list` 走 PIPE 会导致 sessionId 发现失败
+## 8. Pitfall 6：用“最新 Session”推断本次 Session 会串话
 
 ### 症状
 
-fresh run 已经正常回复，OpenCode 日志里也能看到：
-
-```text
-service=session id=ses_xxx created
-```
-
-但下一轮平台没有复用 session，`agent_session` 里也没有写入对应 provider session。
+fresh run 没有报告 sessionId，平台却恢复了其他对话的正文，或将其他对话的 Session 保存为当前线程的可复用 Session。
 
 ### 根因
 
-fresh run 输出里通常没有 sessionId，runtime 需要通过 `opencode session list` 补拿最新 session。最后一次故障中，session 实际已经由平台子进程创建，但 `session list` 仍用 PIPE 读取，可能失败、输出不稳定，或者返回非零退出。
+同一个 CLI 环境的会话列表可能包含其他线程、用户或手动创建的会话。“最新”以及 cwd 相同都不能证明 Session 属于当前 invocation；从回复正文中提取 ID 也不能证明归属。改用 PTY 或增加重试并不能解决这个问题。
 
 ### 修法
 
-`opencode session list` 和 `opencode export` 一样改为 PTY 读取。
+只使用本次结构化输出提供的 Session ID，或请求中明确指定的复用 ID。没有 ID 就跳过 export 和 Session 持久化，不尝试从全局会话列表恢复。已知 Session 的 export 仍使用 PTY。
 
 ### 规则
 
-**session discovery 也是 provider 关键路径**。不能认为它只是辅助命令就继续走 PIPE。
+**无法确认归属就拒绝恢复**。CLI 不返回结构化 Session 元数据时，不支持自动建立复用关系；不能为了恢复能力牺牲会话隔离。
 
 ## 9. Pitfall 7：过早把问题归因到 cwd
 
@@ -216,15 +210,15 @@ directory=/Users/fine/PyProjects/agent-crossing/services/agent-runtime
 
 ### 根因
 
-cwd 确实可能影响 OpenCode 的 project 归属，但这次直接根因不是 cwd，而是平台读取 `session list` 的方式和手动终端不同。没有先拿到 runtime 的 returnCode/stdout/stderr，就过早下结论。
+cwd 确实可能影响 OpenCode 的 project 归属，但手动会话列表能看到 Session，不代表该 ID 已由本次执行报告。终端显示、结构化输出和平台保存的 ID 需要分别确认。
 
 ### 修法
 
 排查顺序改成：
 
 1. 先确认 OpenCode 日志是否创建 session。
-2. 再确认 runtime 是否执行 `session list`。
-3. 再看 `session list` 的 read mode、return code、stdout/stderr tail。
+2. 再确认本次 `run` 是否返回结构化 Session 元数据，或请求是否携带明确的复用 ID。
+3. 再看本次 `run` / 已知 Session 的 `export` 的 read mode、return code、stdout/stderr tail；不自动查询会话列表。
 4. 最后再判断 cwd 是否影响 project/session 归属。
 
 ### 规则
@@ -241,7 +235,7 @@ cwd 确实可能影响 OpenCode 的 project 归属，但这次直接根因不是
 OpenCode completed without text output. Check the execution log or OpenCode local logs for provider/session details.
 ```
 
-但无法判断到底是 run 无输出、session list 失败、export 非零退出、JSON 解析失败，还是当前轮 assistant 未匹配。
+但无法判断到底是 run 无输出、缺少可确认的 Session ID、export 非零退出、JSON 解析失败，还是当前轮 assistant 未匹配。
 
 ### 根因
 
@@ -270,7 +264,7 @@ fallback raw payload 至少保留：
 - [ ] reused run 是否仍走 `opencode -s <sessionId> run <prompt>`？
 - [ ] reused run 是否跳过 stdout 正文作为最终答案？
 - [ ] `opencode export <sessionId>` 是否走 PTY？
-- [ ] `opencode session list` 是否走 PTY？
+- [ ] 缺少 Session ID 时是否禁止 `session list` 和 export，且不将正文里的 ID 当作 Session 元数据？
 - [ ] export 解析是否绑定当前轮 user，而不是直接取最后一条 assistant？
 - [ ] 时间戳是否只作为兜底，不能覆盖 `parentID` 匹配？
 - [ ] fallback raw 是否包含足够 diagnostics？
@@ -282,14 +276,14 @@ fallback raw payload 至少保留：
 
 1. 查 `agent_session` 是否存在当前 `userId + threadId + opencode + opencode`。
 2. 如果不存在，查 runtime 返回的 `DONE.raw.providerSessionId`。
-3. 如果没有 `providerSessionId`，查 `opencode session list` 是否执行成功。
+3. 如果没有 `providerSessionId`，查本次 `run` 是否返回结构化 Session 元数据；没有则不能建立复用关系，不从会话列表补拿。
 4. 如果已有 sessionId 但回复为空，手动执行 `opencode export <sessionId>` 看 JSON 是否完整。
 5. 如果 export 有文本但前端重复旧回复，检查当前轮 user marker 和 assistant `parentID`。
 6. 如果手动终端正常、平台不正常，优先对比 PTY/PIPE、cwd、env，而不是先改业务逻辑。
 
 ## 13. 长期改进项
 
-- 给 `session list` 增加短轮询和显式 diagnostics，避免 session index 延迟写入时直接丢失 provider session。
+- 在 CLI 支持时增加可与本次 invocation 明确关联的 Session 创建/返回协议；不使用“最新 Session”或正文扫描作为兜底。
 - 增加 provider command audit log，记录 command 类型、cwd、read mode、returnCode，不记录完整 prompt。
 - 抽出 OpenCode session export parser 的 fixture 测试，覆盖多轮 user/assistant、tool-only、延迟写入、无 parentID 等边界。
 - 保持 `AGENT_RUNTIME_CLI_WORKING_DIRECTORY` 显式配置，避免 runtime 启动目录改变 provider project 归属。

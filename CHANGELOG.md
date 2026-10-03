@@ -153,6 +153,8 @@ Format follows a product-engineering changelog style: each version includes impl
 
 ### Fixed
 
+- Prevented delayed Runtime execute requests from starting a CLI after cancellation by checking expiring cancellation markers atomically with execution registration. Markers default to 300 seconds, repeated cancellation renews them without interrupting cleanup, and `accepted` now acknowledges recording a cancellation even before execution starts (2026-10-03).
+- Prevented OpenCode from binding an invocation to another conversation by removing latest-session discovery and session-ID extraction from answer text. Missing session identity no longer triggers `session list` or export; recovery for explicitly resumed or structurally reported sessions remains available (2026-10-03).
 - Fixed MasterAgent ordinary Q&A failures when Claude Code emits assistant text on stdout but does not call the final `submit_direct_answer` MCP tool; stdout assistant text is now used as a direct-answer fallback with provider session capture preserved (2026-06-30).
 - Fixed `scripts/dev-up.sh` agent-runtime startup stability by launching the project venv `uvicorn` directly as the long-lived background process and detaching stdin from `/dev/null`; this prevents readiness from passing through a short-lived wrapper/session and then leaving platform-api with `Connection refused` on `8090` (2026-06-30).
 - Fixed MasterAgent timeouts caused by reused Claude Code sessions calling MCP tools with a stale `planningSessionId`; when there is exactly one active planning session, any stale/unknown planning id is now safely resolved to that active session, while concurrent sessions still reject ambiguous stale ids (2026-06-30).

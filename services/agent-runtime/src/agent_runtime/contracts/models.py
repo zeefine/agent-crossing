@@ -238,4 +238,4 @@ class SessionCompressionResponse(ContractModel):
 
 class RuntimeCancelResponse(ContractModel):
     invocation_id: str = Field(alias="invocationId")
-    accepted: bool
+    accepted: bool = Field(description="Cancellation was recorded; does not imply the CLI has already exited.")

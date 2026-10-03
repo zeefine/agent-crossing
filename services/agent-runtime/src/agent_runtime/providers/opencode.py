@@ -74,11 +74,9 @@ class OpenCodeProvider(BaseProvider):
         "The arguments provided to the tool are invalid:",
         "Error message:",
     )
-    _SESSION_ID_PATTERN = re.compile(r"\bses_[A-Za-z0-9]+\b")
     _DIAGNOSTIC_TAIL_CHARS = 4000
     _SESSION_EXPORT_ATTEMPTS = 10
     _SESSION_EXPORT_RETRY_DELAY_SECONDS = 5.0
-    _SESSION_LIST_TIMEOUT_SECONDS = 5.0
 
     def __init__(
         self,
@@ -443,9 +441,9 @@ class OpenCodeProvider(BaseProvider):
         previous_user_marker: str | None = None,
         min_message_created_at_ms: int | None = None,
     ) -> list[AgentMessage]:
+        # Only this run's structured metadata or an explicitly resumed session establishes identity.
+        # A global session list can belong to another invocation/user, even when it is the newest.
         session_id = session_ids[-1] if session_ids else request.provider_session_id
-        if not session_id:
-            session_id = await self._latest_session_id_from_session_list()
         if return_code not in (0, None):
             error = self._normalizer.error(
                 request,
@@ -607,9 +605,6 @@ class OpenCodeProvider(BaseProvider):
             stripped = clean_line.strip()
             if not stripped:
                 continue
-            plain_session_id = self._extract_session_id_from_text(stripped)
-            if plain_session_id and session_ids is not None:
-                session_ids.append(plain_session_id)
             stripped = self._strip_plain_status_prefix(stripped)
             if not stripped:
                 continue
@@ -629,21 +624,6 @@ class OpenCodeProvider(BaseProvider):
             if transformed is not None:
                 messages.append(transformed)
         return messages
-
-    async def _latest_session_id_from_session_list(self) -> str | None:
-        command = self._build_session_list_command()
-        if not command:
-            return None
-        try:
-            return_code, stdout, _ = await self._run_pty_command_with_timeout(
-                command,
-                timeout_seconds=self._session_list_timeout_seconds(),
-            )
-        except (FileNotFoundError, TimeoutError):
-            return None
-        if return_code not in (0, None):
-            return None
-        return self._extract_latest_session_id_from_list(stdout.decode("utf-8", errors="replace"))
 
     async def _run_pty_command_with_timeout(
         self,
@@ -699,15 +679,6 @@ class OpenCodeProvider(BaseProvider):
             chunks.append(chunk)
         return_code = await process.wait()
         return return_code, b"".join(chunks), b""
-
-    def _build_session_list_command(self) -> list[str]:
-        command = shlex.split(self._command)
-        if not command:
-            return []
-        return [*command, "session", "list"]
-
-    def _session_list_timeout_seconds(self) -> float:
-        return min(self._SESSION_LIST_TIMEOUT_SECONDS, max(0.1, self._timeout_seconds / 4))
 
     def _build_session_export_command(self, session_id: str) -> list[str]:
         command = shlex.split(self._command)
@@ -883,12 +854,6 @@ class OpenCodeProvider(BaseProvider):
             return {}
         return {"diagnostics": diagnostics}
 
-    @classmethod
-    def _extract_latest_session_id_from_list(cls, output: str) -> str | None:
-        clean_output = cls._clean_terminal_text(output)
-        match = cls._SESSION_ID_PATTERN.search(clean_output)
-        return match.group(0) if match else None
-
     def _silent_completion_message(
         self,
         request: AgentExecutionRequest,
@@ -939,11 +904,6 @@ class OpenCodeProvider(BaseProvider):
     @classmethod
     def _clean_terminal_text(cls, text: str) -> str:
         return cls._ANSI_PATTERN.sub("", text)
-
-    @classmethod
-    def _extract_session_id_from_text(cls, line: str) -> str | None:
-        match = cls._SESSION_ID_PATTERN.search(line)
-        return match.group(0) if match else None
 
     @classmethod
     def _extract_latest_assistant_text_from_export(cls, output: str) -> str:

@@ -233,6 +233,16 @@ completion/cancellation through the same repository monitor and uses atomic per-
 Task status events and runtime cancellation requests are sent after the state transaction commits; runtime
 execution and session compression do not hold that transaction open. No schema change is needed.
 
+Agent Runtime records cancellation before looking for an active execution. Cancellation and execution
+registration share one lock, so an execute request arriving after cancellation does not start a Provider.
+Markers use a monotonic-clock TTL configured by `AGENT_RUNTIME_CANCELLATION_TTL_SECONDS` (default 300,
+positive finite seconds); choose a value longer than the maximum delayed execute request/retry window.
+Repeated cancellations renew the TTL without interrupting CLI cleanup again. Rejected retries and normal
+cleanup do not consume the marker; expired entries are reclaimed on the next execute/cancel operation.
+The cancellation endpoint's `accepted: true` means the request was recorded, not that a CLI was already
+running or has finished exiting. This protection is local to one Runtime process and does not survive
+restart or coordinate multiple workers; those deployments need shared cancellation state.
+
 ### Late streaming callbacks
 
 Callbacks for `SUCCEEDED`, `FAILED`, or `CANCELED` invocations are acknowledged with an empty
@@ -303,6 +313,13 @@ handling remain provider-specific. Existing timeout policies are unchanged: the 
 termination helper is used only where the adapter previously used that same behavior.
 
 OpenCode is invoked through `opencode run <prompt>` for fresh sessions and `opencode -s <sessionId> run <prompt>` for reused sessions. Reused sessions may require `opencode export <sessionId>` recovery because OpenCode can write final content to the session without emitting it to the command line.
+
+Session recovery uses only an ID reported in the current run's structured session metadata or
+explicitly supplied for reuse. The adapter never selects a session from `opencode session list`
+or extracts an ID from answer text. If no session ID is available, stdout content is still returned,
+but no session is exported or persisted for reuse; an empty response retains the existing
+`missing_session_id` diagnostic. CLI versions that omit structured session metadata therefore
+cannot establish a reusable session through this adapter.
 
 ### ClaudeCode
 

@@ -260,7 +260,7 @@ def test_runtime_service_cancels_active_execution() -> None:
         response = await execution
 
         assert response.messages == []
-        assert await service.cancel("invocation-1") is False
+        assert await service.cancel("invocation-1") is True
 
     asyncio.run(scenario())
 
@@ -1617,7 +1617,11 @@ def test_opencode_provider_retries_export_existing_provider_session_when_run_omi
     assert messages[-1].raw["providerSessionId"] == "ses-existing"
 
 
-def test_opencode_provider_exports_discovered_session_when_fresh_run_omits_text(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_pty", [False, True])
+def test_opencode_provider_exports_reported_session_when_fresh_run_omits_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_pty: bool,
+) -> None:
+    monkeypatch.setattr(settings, "opencode_use_pty", use_pty)
     script = tmp_path / "fake_opencode_fresh_session.py"
     command_log = tmp_path / "commands.jsonl"
     export_payload = {
@@ -1641,23 +1645,20 @@ def test_opencode_provider_exports_discovered_session_when_fresh_run_omits_text(
                 f"log_path = pathlib.Path({str(command_log)!r})",
                 "with log_path.open('a', encoding='utf-8') as log:",
                 "    log.write(json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')",
-                "if sys.argv[1:3] == ['session', 'list']:",
-                "    print('ses_123abc')",
-                "elif sys.argv[1:3] == ['export', 'ses_123abc']:",
+                "if sys.argv[1:3] == ['export', 'ses_123abc']:",
                 f"    print(json.dumps({export_payload!r}, ensure_ascii=False))",
                 "elif 'run' in sys.argv[1:]:",
-                "    pass",
+                "    print(json.dumps({'type': 'step_start', 'sessionID': 'ses_123abc'}))",
             ]
         )
     )
     provider = OpenCodeProvider(command=f"{sys.executable} {script}")
 
-    messages = asyncio.run(provider.execute(execution_request()))
+    messages = asyncio.run(provider.execute(execution_request().model_copy(update={"callback_base_url": None})))
 
     commands = [json.loads(line) for line in command_log.read_text(encoding="utf-8").splitlines()]
     assert "run" in commands[0]
-    assert commands[1] == ["session", "list"]
-    assert commands[2] == ["export", "ses_123abc"]
+    assert commands[1:] == [["export", "ses_123abc"]]
     assert [message.type for message in messages] == [AgentMessageType.TEXT_DELTA, AgentMessageType.DONE]
     assert messages[0].content == "2"
     assert messages[0].raw["source"] == "session_export_fallback"
@@ -1843,16 +1844,19 @@ def test_opencode_provider_prefers_baseline_order_over_runtime_timestamp_gate() 
     assert assistant["text"] == "current answer"
 
 
-def test_opencode_provider_uses_session_list_when_run_omits_session_id(
-    tmp_path: Path,
+@pytest.mark.parametrize("use_pty", [False, True])
+@pytest.mark.parametrize("run_result", ["silent", "text", "error"])
+def test_opencode_provider_never_uses_other_sessions_when_run_omits_session_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_pty: bool, run_result: str,
 ) -> None:
+    monkeypatch.setattr(settings, "opencode_use_pty", use_pty)
     script = tmp_path / "fake_opencode_session_list.py"
     command_log = tmp_path / "commands.jsonl"
     export_payload = {
         "messages": [
             {
                 "info": {"role": "assistant"},
-                "parts": [{"type": "text", "text": "recovered from session list"}],
+                "parts": [{"type": "text", "text": "SYNTHETIC_OTHER_USER_PRIVATE_ANSWER"}],
             },
         ]
     }
@@ -1866,7 +1870,8 @@ def test_opencode_provider_uses_session_list_when_run_omits_session_id(
                 "with log_path.open('a', encoding='utf-8') as log:",
                 "    log.write(json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')",
                 "if 'run' in sys.argv[1:]:",
-                "    pass",
+                f"    if {run_result!r} == 'text': print('current invocation answer')",
+                f"    if {run_result!r} == 'error': sys.exit(1)",
                 "elif sys.argv[1:3] == ['session', 'list']:",
                 "    print('ses_newest123  shiny-forest  2026-06-29')",
                 "    print('ses_older123   old-forest    2026-06-28')",
@@ -1877,40 +1882,45 @@ def test_opencode_provider_uses_session_list_when_run_omits_session_id(
     )
     provider = OpenCodeProvider(command=f"{sys.executable} {script}")
 
-    messages = asyncio.run(provider.execute(execution_request()))
+    messages = asyncio.run(provider.execute(execution_request().model_copy(update={"callback_base_url": None})))
 
     commands = [json.loads(line) for line in command_log.read_text(encoding="utf-8").splitlines()]
     assert commands[0][0] == "run"
-    assert commands[1] == ["session", "list"]
-    assert commands[2] == ["export", "ses_newest123"]
-    assert [message.type for message in messages] == [AgentMessageType.TEXT_DELTA, AgentMessageType.DONE]
-    assert messages[0].content == "recovered from session list"
-    assert messages[-1].raw["providerSessionId"] == "ses_newest123"
-
-
-def test_opencode_provider_session_list_timeout_does_not_hang_execute(tmp_path: Path) -> None:
-    script = tmp_path / "fake_opencode_hanging_session_list.py"
-    script.write_text(
-        "\n".join(
-            [
-                "import sys",
-                "import time",
-                "if 'run' in sys.argv[1:]:",
-                "    pass",
-                "elif sys.argv[1:3] == ['session', 'list']:",
-                "    time.sleep(5)",
-            ]
-        )
+    assert len(commands) == 1, "Missing session identity must not trigger session list or export"
+    assert messages[-1].type == AgentMessageType.DONE
+    assert not messages[-1].raw.get("providerSessionId")
+    assert not messages[-1].raw.get("sessionId")
+    assert "SYNTHETIC_OTHER_USER_PRIVATE_ANSWER" not in json.dumps(
+        [message.model_dump(mode="json") for message in messages]
     )
-    provider = OpenCodeProvider(command=f"{sys.executable} {script}", timeout_seconds=0.5)
+    if run_result == "text":
+        assert messages[0].content == "current invocation answer"
+    elif run_result == "error":
+        assert messages[0].type == AgentMessageType.ERROR
+    else:
+        assert messages[0].raw["sessionExportFallback"]["reason"] == "missing_session_id"
+        assert messages[0].raw["sessionExportFallback"]["attempted"] is False
 
-    started_at = time.monotonic()
-    messages = asyncio.run(provider.execute(execution_request()))
-    elapsed = time.monotonic() - started_at
 
-    assert elapsed < 3
-    assert [message.type for message in messages] == [AgentMessageType.MESSAGE, AgentMessageType.DONE]
-    assert messages[0].raw["sessionExportFallback"]["reason"] == "missing_session_id"
+@pytest.mark.parametrize("known_session", [False, True])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_opencode_provider_does_not_treat_answer_text_as_session_identity(
+    known_session: bool, json_output: bool,
+) -> None:
+    provider = OpenCodeProvider(command="unused")
+    session_ids: list[str] = []
+    request = execution_request().model_copy(update={"callback_base_url": None})
+    if known_session:
+        provider._stdout_to_messages(
+            request, json.dumps({"type": "step_start", "sessionID": "ses_current123"}), session_ids
+        )
+    text = "Example session ses_other123 is quoted content, not this invocation's identity"
+    output = json.dumps({"type": "text", "part": {"text": text}}) if json_output else text
+
+    messages = provider._stdout_to_messages(request, output, session_ids)
+
+    assert messages[0].content == text
+    assert session_ids == (["ses_current123"] if known_session else [])
 
 
 def test_opencode_provider_parses_part_event_text(tmp_path: Path) -> None:

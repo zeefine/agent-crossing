@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     codex_extra_args: str = Field(default="")
     cli_working_directory: str | None = Field(default="/Users/fine/PyProjects/agent-crossing")
     provider_timeout_seconds: float = Field(default=60.0)
+    cancellation_ttl_seconds: float = Field(default=300.0, gt=0, allow_inf_nan=False)
     master_agent_enabled: bool = Field(default=True)
     master_agent_command: str = Field(default="claude")
     master_agent_extra_args: str = Field(default="")
