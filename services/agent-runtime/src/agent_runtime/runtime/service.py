@@ -6,8 +6,9 @@ from time import monotonic
 from fastapi import HTTPException
 
 from agent_runtime.config import settings
-from agent_runtime.contracts.models import AgentExecutionRequest, AgentExecutionResponse
+from agent_runtime.contracts.models import AgentExecutionRequest, AgentExecutionResponse, PromptVersionConflictDetail
 from agent_runtime.providers.registry import ProviderRegistry
+from agent_runtime.prompt_session import PromptVersionChangedError
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,12 @@ class AgentRuntimeService:
             self._active_execution_tasks[request.invocation_id] = current_task
         try:
             messages = await provider.execute(request)
+        except PromptVersionChangedError as exception:
+            # Provider validation happens before opening callbacks or starting a CLI. Only this explicit
+            # conflict is safe to retry after platform-side summary/tail preparation.
+            raise HTTPException(status_code=409, detail=PromptVersionConflictDetail(
+                currentPromptVersion=exception.current_prompt_version,
+            ).model_dump(by_alias=True)) from exception
         except asyncio.CancelledError:
             # The platform has already committed CANCELED before it asks us to terminate the CLI.
             logger.info("Runtime invocation canceled invocationId=%s", request.invocation_id)

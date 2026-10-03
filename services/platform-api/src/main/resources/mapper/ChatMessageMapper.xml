@@ -73,30 +73,61 @@
         ORDER BY message.created_at DESC, message.message_id ASC
     </select>
 
-    <select id="findVisibleMessagesAfterCursor" resultMap="ChatMessageResultMap">
-        <!-- 内层保留最新消息，外层恢复正序供 Prompt 注入。游标成功推进后，更旧的溢出消息会被丢弃。 -->
-        SELECT recent_messages.*
+    <select id="findUnacknowledgedVisibleMessages" resultMap="ChatMessageResultMap">
+        <!-- Only exact delivered versions are excluded. Older/late-completing rows remain eligible. -->
+        SELECT message.*
         FROM (
-            SELECT * FROM chat_message
-            WHERE thread_id = #{threadId}
+            SELECT message.message_id, message.created_at FROM chat_message message
+            JOIN chat_thread thread ON thread.thread_id = message.thread_id AND thread.user_id = #{userId}
+            LEFT JOIN agent_context_message_receipt receipt
+              ON receipt.user_id = #{userId} AND receipt.thread_id = message.thread_id
+             AND receipt.agent_id = #{currentAgentId} AND receipt.message_id = message.message_id
+            WHERE message.thread_id = #{threadId} AND message.status = 'COMPLETED'
               AND (
-                role = 'USER'
-                OR (role = 'ASSISTANT' AND agent_id IS NOT NULL AND agent_id != #{currentAgentId})
+                message.role = 'USER'
+                OR (message.role = 'ASSISTANT' AND message.agent_id IS NOT NULL AND message.agent_id != #{currentAgentId})
               )
-              <if test="lastInjectedCreatedAt != null and lastInjectedMessageId != null">
-              AND (
-                created_at &gt; #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
-                OR (
-                  created_at = #{lastInjectedCreatedAt, typeHandler=com.agentcrossing.platform.infrastructure.persistence.mybatis.typehandler.InstantTypeHandler}
-                  AND message_id &gt; #{lastInjectedMessageId}
-                )
-              )
-              </if>
-            ORDER BY created_at DESC, message_id DESC
+              AND (receipt.message_id IS NULL OR receipt.content_version != message.context_version)
+            ORDER BY message.created_at DESC, message.message_id DESC
             LIMIT #{limit}
-        ) recent_messages
+        ) recent_messages JOIN chat_message message ON message.message_id = recent_messages.message_id
         ORDER BY recent_messages.created_at ASC, recent_messages.message_id ASC
     </select>
+
+    <insert id="acknowledgeContextMessages">
+        INSERT INTO agent_context_message_receipt
+            (user_id, thread_id, agent_id, message_id, content_version, summarized_version)
+        SELECT #{userId}, #{threadId}, #{agentId}, delivered.message_id, delivered.content_version,
+               CASE WHEN #{summarized} THEN delivered.content_version ELSE NULL END
+        FROM (
+            <foreach collection="receipts" item="receipt" separator=" UNION ALL ">
+                SELECT #{receipt.messageId} AS message_id, #{receipt.contentVersion} AS content_version
+            </foreach>
+        ) delivered
+        JOIN chat_message message ON message.message_id = delivered.message_id AND message.thread_id = #{threadId}
+        JOIN chat_thread thread ON thread.thread_id = message.thread_id AND thread.user_id = #{userId}
+        ON DUPLICATE KEY UPDATE content_version = VALUES(content_version),
+            summarized_version = COALESCE(VALUES(summarized_version), summarized_version),
+            acknowledged_at = CURRENT_TIMESTAMP(3)
+    </insert>
+
+    <resultMap id="ContextReceiptResultMap" type="com.agentcrossing.platform.domain.message.ContextMessageReceipt">
+        <constructor>
+            <idArg column="message_id" javaType="java.lang.String"/>
+            <arg column="summarized_version" javaType="java.lang.String"/>
+        </constructor>
+    </resultMap>
+
+    <select id="findSummarizedContextMessages" resultMap="ContextReceiptResultMap">
+        SELECT message_id, summarized_version FROM agent_context_message_receipt
+        WHERE user_id = #{userId} AND thread_id = #{threadId} AND agent_id = #{agentId}
+          AND summarized_version IS NOT NULL
+    </select>
+
+    <update id="clearSummarizedContextMessages">
+        UPDATE agent_context_message_receipt SET summarized_version = NULL
+        WHERE user_id = #{userId} AND thread_id = #{threadId} AND agent_id = #{agentId}
+    </update>
 
     <select id="findAssistantStreamByInvocationId" resultMap="ChatMessageResultMap">
         SELECT * FROM chat_message

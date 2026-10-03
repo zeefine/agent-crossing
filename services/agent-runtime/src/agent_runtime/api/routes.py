@@ -7,6 +7,7 @@ from agent_runtime.contracts.models import (
     AgentExecutionResponse,
     ApiResponse,
     HealthResponse,
+    PromptVersionConflictResponse,
     RuntimeCancelResponse,
     SessionCompressionRequest,
     SessionCompressionResponse,
@@ -45,7 +46,8 @@ async def parse_user_input(request: UserInputParseRequest) -> UserInputParseResp
         ) from exception
 
 
-@router.post("/runtime/execute", response_model=AgentExecutionResponse)
+@router.post("/runtime/execute", response_model=AgentExecutionResponse,
+             responses={409: {"model": PromptVersionConflictResponse}})
 async def execute_agent(request: AgentExecutionRequest) -> AgentExecutionResponse:
     return await runtime_service.execute(request)
 

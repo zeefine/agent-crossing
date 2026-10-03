@@ -41,6 +41,16 @@ public class MybatisTaskRepository implements TaskRepository, TaskDispatchSnapsh
     }
 
     @Override
+    public Optional<Task> findByTaskIdForUpdate(String taskId) {
+        return Optional.ofNullable(taskMapper.findByTaskIdForUpdate(taskId));
+    }
+
+    @Override
+    public List<Task> findByTraceIdAndUserIdForUpdate(String traceId, String userId) {
+        return taskMapper.findByTraceIdAndUserIdForUpdate(traceId, userId);
+    }
+
+    @Override
     public Optional<Task> findByTaskIdAndUserId(String taskId, String userId) {
         return Optional.ofNullable(taskMapper.findByTaskIdAndUserId(taskId, userId));
     }

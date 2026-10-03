@@ -75,6 +75,7 @@ public class ChatService {
     private final ThreadPlanningQueue threadPlanningQueue;
     private final ThreadStatusAggregator threadStatusAggregator;
     private final TransactionTemplate transactionTemplate;
+    private final TransactionTemplate deletionTransactionTemplate;
 
     public ChatService(
             ChatThreadRepository chatThreadRepository,
@@ -114,6 +115,15 @@ public class ChatService {
         this.threadStatusAggregator = java.util.Objects.requireNonNull(threadStatusAggregator, "threadStatusAggregator");
         PlatformTransactionManager manager = transactionManagerProvider.getIfAvailable();
         this.transactionTemplate = manager == null ? null : new TransactionTemplate(manager);
+        this.deletionTransactionTemplate = manager == null ? null : new TransactionTemplate(manager);
+        if (deletionTransactionTemplate != null) {
+            deletionTransactionTemplate.setPropagationBehavior(
+                    org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            // The thread lookup precedes parent locking. Read child IDs from a fresh snapshot after waiting
+            // for result writers, including invocations created while this deletion was waiting.
+            deletionTransactionTemplate.setIsolationLevel(
+                    org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+        }
     }
 
     @Autowired(required = false)
@@ -175,8 +185,18 @@ public class ChatService {
         return new ChatSubmitResult(thread, userMessage, null, List.of());
     }
 
-    @Transactional
     public void deleteThread(String userId, String threadId) {
+        // Match ExecutionStateService: the monitor also covers commit, not just the transaction body.
+        synchronized (taskRepository == null ? chatThreadRepository : taskRepository) {
+            if (deletionTransactionTemplate == null) {
+                deleteThreadLocked(userId, threadId);
+            } else {
+                deletionTransactionTemplate.executeWithoutResult(status -> deleteThreadLocked(userId, threadId));
+            }
+        }
+    }
+
+    private void deleteThreadLocked(String userId, String threadId) {
         ChatThread thread = chatThreadRepository
                 .findByThreadIdAndUserId(threadId, userId)
                 .orElseThrow(() -> new IllegalArgumentException("Chat thread not found: " + threadId));
@@ -184,7 +204,7 @@ public class ChatService {
         threadPlanningQueue.remove(userId, threadId);
         List<Task> traceTasks = taskRepository == null
                 ? List.of()
-                : taskRepository.findByTraceIdAndUserId(traceId, userId);
+                : taskRepository.findByTraceIdAndUserIdForUpdate(traceId, userId);
         List<String> traceTaskIds = traceTasks.stream().map(Task::taskId).toList();
 
         markActiveWorkCanceled(traceTasks, traceId, userId);

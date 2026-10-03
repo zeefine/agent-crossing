@@ -12,6 +12,7 @@ import com.agentcrossing.platform.domain.context.InMemoryAgentContextCursorRepos
 import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
+import com.agentcrossing.platform.domain.message.ContextMessageReceipt;
 import com.agentcrossing.platform.domain.message.InMemoryChatMessageRepository;
 import com.agentcrossing.platform.domain.session.AgentSessionHistory;
 import com.agentcrossing.platform.domain.session.AgentSessionHistoryStatus;
@@ -35,6 +36,8 @@ class AgentContextServiceTests {
         messageRepository.save(new ChatMessage(
                 "message-old", "thread-1", ChatMessageRole.USER, "old", ChatMessageStatus.COMPLETED,
                 null, null, null, now, now));
+        messageRepository.acknowledgeSummarizedMessages("user-1", "thread-1", "opencode",
+                List.of(ContextMessageReceipt.of("message-old", "old")), true);
         messageRepository.save(new ChatMessage(
                 "message-tail", "thread-1", ChatMessageRole.ASSISTANT, "retained own answer",
                 ChatMessageStatus.COMPLETED, "invocation-1", "task-1", "opencode",
@@ -102,6 +105,101 @@ class AgentContextServiceTests {
     }
 
     @Test
+    void deliversCompletedReplyEvenAfterAcknowledgingANewerUserMessage() {
+        ContextFixture fixture = contextFixture();
+        Instant base = fixture.base();
+        fixture.messages().save(new ChatMessage(
+                "message-reply", "thread-1", ChatMessageRole.ASSISTANT, "partial",
+                ChatMessageStatus.STREAMING, "invocation-other", "task-other", "codex", base, base));
+        fixture.messages().save(new ChatMessage(
+                "message-user", "thread-1", ChatMessageRole.USER, "newer question",
+                ChatMessageStatus.COMPLETED, null, null, null, base.plusSeconds(1), base.plusSeconds(1)));
+
+        AgentContextPack first = fixture.service().buildContextPack(task(base));
+        assertThat(first.incrementalChatMessages()).extracting(IncrementalChatMessage::messageId)
+                .containsExactly("message-user");
+        fixture.service().acknowledgeInjectedMessages(task(base), first);
+
+        fixture.messages().save(new ChatMessage(
+                "message-reply", "thread-1", ChatMessageRole.ASSISTANT, "complete answer",
+                ChatMessageStatus.COMPLETED, "invocation-other", "task-other", "codex",
+                base, base.plusSeconds(2)));
+        AgentContextPack second = fixture.service().buildContextPack(task(base));
+        assertThat(second.incrementalChatMessages()).extracting(IncrementalChatMessage::content)
+                .containsExactly("complete answer");
+        fixture.service().acknowledgeInjectedMessages(task(base), second);
+        assertThat(fixture.service().buildContextPack(task(base)).incrementalChatMessages()).isEmpty();
+    }
+
+    @Test
+    void acknowledgingAnOlderSnapshotDoesNotConsumeRevisedContentWithTheSameTimestamp() {
+        ContextFixture fixture = contextFixture();
+        Instant base = fixture.base();
+        fixture.messages().save(new ChatMessage(
+                "message-reply", "thread-1", ChatMessageRole.ASSISTANT, "first complete answer",
+                ChatMessageStatus.COMPLETED, "invocation-other", "task-other", "codex", base, base));
+        AgentContextPack first = fixture.service().buildContextPack(task(base));
+        assertThat(first.incrementalChatMessages()).extracting(IncrementalChatMessage::content)
+                .containsExactly("first complete answer");
+
+        fixture.messages().save(new ChatMessage(
+                "message-reply", "thread-1", ChatMessageRole.ASSISTANT, "corrected complete answer",
+                ChatMessageStatus.COMPLETED, "invocation-other", "task-other", "codex", base, base));
+        fixture.service().acknowledgeInjectedMessages(task(base), first);
+
+        AgentContextPack second = fixture.service().buildContextPack(task(base));
+        assertThat(second.incrementalChatMessages()).extracting(IncrementalChatMessage::content)
+                .containsExactly("corrected complete answer");
+        fixture.service().acknowledgeInjectedMessages(task(base), second);
+        assertThat(fixture.service().buildContextPack(task(base)).incrementalChatMessages()).isEmpty();
+    }
+
+    @Test
+    void acknowledgingLatestTwentyDoesNotConsumeFiveMessagesThatWereNotIncluded() {
+        ContextFixture fixture = contextFixture();
+        Instant base = fixture.base();
+        for (int index = 1; index <= 25; index++) {
+            Instant createdAt = base.plusSeconds(index);
+            fixture.messages().save(new ChatMessage(
+                    "message-%02d".formatted(index), "thread-1", ChatMessageRole.USER,
+                    "message " + index, ChatMessageStatus.COMPLETED,
+                    null, null, null, createdAt, createdAt));
+        }
+        AgentContextPack first = fixture.service().buildContextPack(task(base));
+        assertThat(first.incrementalChatMessages()).hasSize(20);
+        fixture.service().acknowledgeInjectedMessages(task(base), first);
+
+        AgentContextPack second = fixture.service().buildContextPack(task(base));
+        assertThat(second.incrementalChatMessages()).extracting(IncrementalChatMessage::messageId)
+                .containsExactly("message-01", "message-02", "message-03", "message-04", "message-05");
+        fixture.service().acknowledgeInjectedMessages(task(base), second);
+        assertThat(fixture.service().buildContextPack(task(base)).incrementalChatMessages()).isEmpty();
+    }
+
+    @Test
+    void incrementalContextExcludesFailedCanceledAndOwnAssistantMessages() {
+        ContextFixture fixture = contextFixture();
+        Instant base = fixture.base();
+        fixture.messages().save(new ChatMessage(
+                "message-failed", "thread-1", ChatMessageRole.ASSISTANT, "failed partial answer",
+                ChatMessageStatus.FAILED, "invocation-failed", "task-failed", "codex", base, base));
+        fixture.messages().save(new ChatMessage(
+                "message-canceled", "thread-1", ChatMessageRole.ASSISTANT, "canceled partial answer",
+                ChatMessageStatus.CANCELED, "invocation-canceled", "task-canceled", "codex", base, base));
+        fixture.messages().save(new ChatMessage(
+                "message-own", "thread-1", ChatMessageRole.ASSISTANT, "own answer already in session",
+                ChatMessageStatus.COMPLETED, "invocation-own", "task-own", "opencode", base, base));
+        fixture.messages().save(new ChatMessage(
+                "message-other", "thread-1", ChatMessageRole.ASSISTANT, "other complete answer",
+                ChatMessageStatus.COMPLETED, "invocation-other", "task-other", "codex", base, base));
+
+        AgentContextPack pack = fixture.service().buildContextPack(task(base));
+
+        assertThat(pack.incrementalChatMessages()).extracting(IncrementalChatMessage::messageId)
+                .containsExactly("message-other");
+    }
+
+    @Test
     void buildsAvailableAgentDirectoryFromAgentRegistry() {
         InMemoryChatThreadRepository threadRepository = new InMemoryChatThreadRepository();
         AgentRegistry agentRegistry = new AgentRegistry(new InMemoryAgentCatalog());
@@ -152,6 +250,21 @@ class AgentContextServiceTests {
         assertThat(contextPack.availableAgents().getFirst().role()).isEqualTo("Architecture reviewer");
         assertThat(contextPack.availableAgents().getFirst().capabilities())
                 .containsExactly("reasoning", "code review");
+    }
+
+    private static ContextFixture contextFixture() {
+        Instant base = Instant.parse("2026-10-03T03:00:00.123Z");
+        InMemoryChatThreadRepository threads = new InMemoryChatThreadRepository();
+        InMemoryChatMessageRepository messages = new InMemoryChatMessageRepository();
+        threads.save(new ChatThread(
+                "thread-1", "user-1", "Incremental context", ChatThreadStatus.RUNNING,
+                "trace-1", base, base));
+        return new ContextFixture(base, messages, new AgentContextService(
+                threads, messages, new InMemoryAgentContextCursorRepository()));
+    }
+
+    private record ContextFixture(
+            Instant base, InMemoryChatMessageRepository messages, AgentContextService service) {
     }
 
     private static Task task(Instant now) {

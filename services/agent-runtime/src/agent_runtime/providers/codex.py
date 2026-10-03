@@ -49,15 +49,7 @@ class CodexProvider(BaseProvider):
     async def execute(self, request: AgentExecutionRequest) -> list[AgentMessage]:
         prompt_config = load_prompt_config()
         prompt_version = prompt_config.business_agent_prompt_version(request.agent_id)
-        original_session_id = request.provider_session_id
         request = prepare_execution_request(request, prompt_version)
-        if original_session_id and not request.provider_session_id:
-            logger.info(
-                "Rotating Codex session because the static prompt version changed: invocationId=%s taskId=%s agentId=%s",
-                request.invocation_id,
-                request.task_id,
-                request.agent_id,
-            )
 
         command = self._build_command(request)
         if not command:

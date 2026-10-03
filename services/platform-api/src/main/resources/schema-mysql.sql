@@ -359,6 +359,8 @@ CREATE TABLE IF NOT EXISTS chat_message (
     agent_id VARCHAR(128) NULL,
     created_at TIMESTAMP(3) NOT NULL,
     updated_at TIMESTAMP(3) NOT NULL,
+    context_version CHAR(64) CHARACTER SET ascii COLLATE ascii_bin
+        GENERATED ALWAYS AS (SHA2(content, 256)) STORED,
     PRIMARY KEY (message_id),
     KEY idx_chat_message_thread_created (thread_id, created_at, message_id),
     KEY idx_chat_message_invocation_created (invocation_id, created_at, message_id),
@@ -396,6 +398,36 @@ UPDATE chat_message cm
 INNER JOIN task t ON cm.task_id = t.task_id
 SET cm.agent_id = t.agent_id
 WHERE cm.agent_id IS NULL AND cm.task_id IS NOT NULL;
+
+-- Per-agent delivery receipts. No timestamp watermark can safely skip mutable/late-completing messages.
+-- Additive migration: legacy cursors remain available but are not used to seed these receipts.
+-- Stored fingerprint avoids hashing all historical message bodies on every incremental read.
+SET @ac_chat_message_has_context_version := (
+    SELECT COUNT(1) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message' AND COLUMN_NAME = 'context_version'
+);
+SET @ac_chat_message_add_context_version_sql := IF(
+    @ac_chat_message_has_context_version = 0,
+    'ALTER TABLE chat_message ADD COLUMN context_version CHAR(64) CHARACTER SET ascii COLLATE ascii_bin GENERATED ALWAYS AS (SHA2(content, 256)) STORED',
+    'SELECT 1'
+);
+PREPARE ac_chat_message_add_context_version_stmt FROM @ac_chat_message_add_context_version_sql;
+EXECUTE ac_chat_message_add_context_version_stmt;
+DEALLOCATE PREPARE ac_chat_message_add_context_version_stmt;
+
+CREATE TABLE IF NOT EXISTS agent_context_message_receipt (
+    user_id VARCHAR(128) NOT NULL,
+    thread_id VARCHAR(128) NOT NULL,
+    agent_id VARCHAR(128) NOT NULL,
+    message_id VARCHAR(128) NOT NULL,
+    content_version CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    summarized_version CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    acknowledged_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (user_id, thread_id, agent_id, message_id),
+    KEY idx_context_receipt_message (message_id),
+    CONSTRAINT fk_context_receipt_message FOREIGN KEY (message_id)
+        REFERENCES chat_message (message_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS agent_context_cursor (
     user_id VARCHAR(128) NOT NULL,

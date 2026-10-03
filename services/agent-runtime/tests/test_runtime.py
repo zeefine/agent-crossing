@@ -1022,20 +1022,21 @@ def test_business_agent_reused_session_omits_static_prompt(
     assert "Task:\nhello" in prompt
 
 
-def test_business_agent_rotates_session_when_prompt_version_changes() -> None:
+def test_business_agent_keeps_session_when_prompt_version_matches() -> None:
+    current_version = load_prompt_config().business_agent_prompt_version("opencode")
     request = execution_request().model_copy(
         update={
-            "provider_session_id": "provider-session-stale",
-            "provider_prompt_version": "legacy",
+            "provider_session_id": "provider-session-current",
+            "provider_prompt_version": current_version,
         }
     )
-    current_version = load_prompt_config().business_agent_prompt_version("opencode")
 
-    rotated = prepare_execution_request(request, current_version)
+    prepared = prepare_execution_request(request, current_version)
 
-    assert rotated.provider_session_id is None
-    assert rotated.provider_prompt_version is None
-    assert OpenCodeProvider._build_prompt(rotated).startswith("[Role]")
+    assert prepared is request
+    assert prepared.provider_session_id == "provider-session-current"
+    assert prepared.provider_prompt_version == current_version
+    assert OpenCodeProvider._build_prompt(prepared).startswith("[Invocation Context]")
 
 
 def test_business_agent_prompt_limits_multi_turn_collaboration_to_next_hop() -> None:

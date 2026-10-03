@@ -42,6 +42,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -81,6 +82,121 @@ class AgentSessionCompressionServiceTests {
                     "task-1", role == ChatMessageRole.ASSISTANT ? "codex" : null,
                     base.plusSeconds(index), base.plusSeconds(index)));
         }
+    }
+
+    @Test
+    void summaryAcknowledgesOnlyItsSnapshotAndDoesNotConsumeLateCompletions() {
+        messageRepository.save(new ChatMessage(
+                "late-reply", "thread-1", ChatMessageRole.ASSISTANT, "partial", ChatMessageStatus.STREAMING,
+                "late-inv", "late-task", "claudecode", base, base));
+        compressionClient.onCompress = request -> {
+            messageRepository.save(new ChatMessage(
+                    "late-reply", "thread-1", ChatMessageRole.ASSISTANT, "late final", ChatMessageStatus.COMPLETED,
+                    "late-inv", "late-task", "claudecode", base, base.plusSeconds(30)));
+            messageRepository.save(new ChatMessage(
+                    "message-1", "thread-1", ChatMessageRole.USER, "revised while summarizing",
+                    ChatMessageStatus.COMPLETED, null, "task-1", null, base.plusSeconds(1), base.plusSeconds(1)));
+        };
+        service.compactIfNeeded(task(), usage(800_000L));
+        AgentContextService context = new AgentContextService(
+                threadRepository, messageRepository, new InMemoryAgentContextCursorRepository(), null, historyRepository);
+        AgentContextPack startup = context.buildContextPack(task());
+        assertThat(startup.incrementalChatMessages()).extracting(IncrementalChatMessage::content)
+                .contains("late final", "revised while summarizing");
+        context.acknowledgeInjectedMessages(task(), startup);
+        service.rememberSession(task(), "thread-1", new AgentSession(
+                "user-1", "thread-1", "trace-1", "codex", "codex",
+                "provider-session-2", "prompt-v1", base, base));
+
+        AgentContextPack next = context.buildContextPack(task());
+        assertThat(next.incrementalChatMessages()).isEmpty();
+        context.acknowledgeInjectedMessages(task(), next);
+        assertThat(context.buildContextPack(task()).incrementalChatMessages()).isEmpty();
+        compressionClient.onCompress = request -> {};
+        service.compactIfNeeded(task(), usage(800_000L, "provider-session-2"));
+        assertThat(compressionClient.request.generation()).isEqualTo(3);
+        assertThat(compressionClient.request.messages()).extracting(SessionCompressionRequest.CompressionMessage::content)
+                .containsExactly("late final", "revised while summarizing");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0,false", "0,true", "2,false", "2,true"})
+    void promptRotationKeepsShortTailAndPreviousSummaryWithoutCallingModel(int messageCount, boolean previousSummary) {
+        messageRepository.deleteByThreadId("thread-1");
+        for (int i = 1; i <= messageCount; i++) {
+            messageRepository.save(new ChatMessage("short-" + i, "thread-1", ChatMessageRole.USER, "constraint " + i,
+                    ChatMessageStatus.COMPLETED, null, null, null, base.plusSeconds(i), base.plusSeconds(i)));
+        }
+        var active = historyRepository.findActive("user-1", "thread-1", "codex", "codex").orElseThrow();
+        String summary = previousSummary ? "{\"constraint\":\"keep legacy API\"}" : null;
+        historyRepository.save(new AgentSessionHistory(active.sessionRecordId(), "user-1", "thread-1", "trace-1",
+                "codex", "codex", "provider-session-1", 1, AgentSessionHistoryStatus.ACTIVE, null,
+                summary, null, null, null, null, "gpt-5.6", "summary-v1", null, null, base, base, null));
+        var session = sessionRepository.findByThreadId("user-1", "thread-1", "codex", "codex").orElseThrow();
+        service.rotateForPromptChange(task(), session);
+        service.rotateForPromptChange(task(), session); // An already prepared handoff is reused.
+        assertThat(compressionClient.request).isNull();
+        assertThat(historyRepository.findByThreadId("user-1", "thread-1", "codex", "codex")).hasSize(2);
+        assertThat(historyRepository.findCreating("user-1", "thread-1", "codex", "codex")).get().satisfies(pending -> {
+            assertThat(pending.generation()).isEqualTo(2);
+            assertThat(pending.rotationReason()).isEqualTo("PROMPT_VERSION_CHANGED");
+            assertThat(pending.startupSummary()).isEqualTo(summary);
+        });
+        assertThat(contextService().buildContextPack(task()).incrementalChatMessages()).hasSize(messageCount);
+        assertThat(contextService().buildContextPack(task()).startupSummary()).isEqualTo(summary);
+        assertThat(sessionRepository.findByThreadId("user-1", "thread-1", "codex", "codex")).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletionDuringRemoteSummaryDoesNotRestoreSessionOrHistory(boolean summaryFails) throws Exception {
+        var chat = com.agentcrossing.platform.support.ChatServiceTestFactory.create(
+                threadRepository, messageRepository, null, null, null, null, null,
+                new com.agentcrossing.platform.domain.invocation.InMemoryInvocationRepository(),
+                taskRepository, null, null, sessionRepository, null, Runnable::run, null);
+        org.springframework.test.util.ReflectionTestUtils.setField(chat, "agentSessionHistoryRepository", historyRepository);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            compressionClient.onCompress = request -> {
+                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                assertThat(Thread.holdsLock(taskRepository)).isFalse();
+                // A different thread can finish deletion while the model response is still outstanding.
+                try {
+                    executor.submit(() -> chat.deleteThread("user-1", "thread-1")).get(3, TimeUnit.SECONDS);
+                } catch (Exception failure) {
+                    throw new AssertionError("deletion blocked by remote summary", failure);
+                }
+                if (summaryFails) {
+                    throw new IllegalStateException("late summary failure");
+                }
+            };
+            assertThatThrownBy(() -> service.compactIfNeeded(task(), usage(800_000L)))
+                    .isInstanceOf(summaryFails ? IllegalStateException.class : DeletedExecutionException.class);
+        }
+        assertThat(historyRepository.findByThreadId("user-1", "thread-1", "codex", "codex")).isEmpty();
+        assertThat(sessionRepository.findByThreadId("user-1", "thread-1", "codex", "codex")).isEmpty();
+        assertThat(messageRepository.findByThreadId("thread-1")).isEmpty();
+        assertThatThrownBy(() -> service.rememberSession(task(), "thread-1", new AgentSession(
+                "user-1", "thread-1", "trace-1", "codex", "codex", "late-session", "prompt-v1", base, base)))
+                .isInstanceOf(DeletedExecutionException.class);
+        assertThat(sessionRepository.findByThreadId("user-1", "thread-1", "codex", "codex")).isEmpty();
+    }
+
+    @Test
+    void summaryWithoutInheritedBaselineDoesNotTrustPreviousSessionCoverage() {
+        service.compactIfNeeded(task(), usage(800_000L));
+        service.rememberSession(task(), "thread-1", new AgentSession(
+                "user-1", "thread-1", "trace-1", "codex", "codex",
+                "provider-session-2", "prompt-v1", base, base));
+        service.rememberSession(task(), "thread-1", new AgentSession(
+                "user-1", "thread-1", "trace-1", "codex", "codex",
+                "provider-session-3", "prompt-v2", base, base));
+
+        service.compactIfNeeded(task(), usage(800_000L, "provider-session-3"));
+
+        assertThat(compressionClient.request.generation()).isEqualTo(4);
+        assertThat(compressionClient.request.previousStartupSummary()).isNull();
+        assertThat(compressionClient.request.messages()).extracting(SessionCompressionRequest.CompressionMessage::messageId)
+                .containsExactly("message-1", "message-2");
     }
 
     @Test
@@ -458,8 +574,12 @@ class AgentSessionCompressionServiceTests {
     }
 
     private InvocationUsage usage(long contextTokens) {
+        return usage(contextTokens, "provider-session-1");
+    }
+
+    private InvocationUsage usage(long contextTokens, String sessionId) {
         return new InvocationUsage(
-                "invocation-1", "codex", "gpt-5.6", "provider-session-1",
+                "invocation-1", "codex", "gpt-5.6", sessionId,
                 contextTokens, contextTokens, UsagePrecision.EXACT,
                 contextTokens, null, null, null, 100L, null, contextTokens,
                 Map.of("input_tokens", contextTokens), "test", base);

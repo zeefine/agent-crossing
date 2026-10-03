@@ -97,7 +97,25 @@ public class InvocationService {
 
     public Invocation execute(Task task) {
         // invocation 表示“某个 task 的一次 agent 执行”，重试时会创建新的 invocation。
-        Invocation invocation = createInvocation(task);
+        Invocation invocation = newInvocation(task);
+        try {
+            executionStateService.withExistingTask(task.taskId(), () -> invocationRepository.save(invocation));
+            return executeRegistered(task, invocation);
+        } catch (DeletedExecutionException deleted) {
+            if (assistantStreamBuffer != null) {
+                assistantStreamBuffer.closeCallbacksAndDiscard(invocation.invocationId());
+            }
+            log.info("Discarded late execution result for deleted task taskId={} invocationId={}",
+                    task.taskId(), invocation.invocationId());
+            // An ephemeral result for the caller only: never reinsert deleted execution state.
+            return invocation.withStatus(InvocationStatus.CANCELED);
+        } finally {
+            releaseClosedCallbackStream(invocation.invocationId());
+            taskDispatchSignal.signal();
+        }
+    }
+
+    private Invocation executeRegistered(Task task, Invocation invocation) {
         // Router 已预留 PROCESSING；启动时用条件更新确认状态，不能覆盖刚刚提交的取消。
         try {
             ExecutionStateService.State started = executionStateService.start(task.taskId(), invocation.invocationId());
@@ -107,23 +125,31 @@ public class InvocationService {
             if (started.invocation().status() != InvocationStatus.RUNNING || started.task().status() != TaskStatus.PROCESSING) {
                 return started.invocation();
             }
-            AgentExecutionSnapshot snapshot = sessionCompressionService == null
-                    ? loadExecutionSnapshot(task)
-                    : sessionCompressionService.prepareExecution(task, () -> loadExecutionSnapshot(task));
-            AgentContextPack contextPack = snapshot.contextPack();
-            AgentSession providerSession = snapshot.providerSession();
+            AgentExecutionSnapshot snapshot = prepareExecutionSnapshot(task);
             long runtimeStartedAt = System.nanoTime();
-            AgentExecutionResult result = agentRuntimeClient.execute(new AgentExecutionRequest(
-                    invocation.invocationId(),
-                    invocation.userId(),
-                    task.taskId(),
-                    task.traceId(),
-                    task.agentId(),
-                    task.context(),
-                    callbackBaseUrl,
-                    contextPack,
-                    providerSession == null ? null : providerSession.providerSessionId(),
-                    providerSession == null ? null : providerSession.promptVersion()));
+            AgentExecutionResult runtimeResult;
+            try {
+                runtimeResult = executeRuntime(invocation, task, snapshot);
+            } catch (PromptVersionChangedException changed) {
+                // Only this explicit pre-CLI rejection is retryable. Never retry unknown HTTP outcomes.
+                if (snapshot.providerSession() == null || sessionCompressionService == null) {
+                    throw changed;
+                }
+                if (executionStateService.reconcileCancellation(task.taskId(), invocation.invocationId()).canceled()) {
+                    return finishCanceledInvocation(invocation, task);
+                }
+                sessionCompressionService.rotateForPromptChange(task, snapshot.providerSession());
+                snapshot = prepareExecutionSnapshot(task);
+                if (snapshot.providerSession() != null) {
+                    throw new IllegalStateException("Prompt rotation did not prepare a new session");
+                }
+                if (executionStateService.reconcileCancellation(task.taskId(), invocation.invocationId()).canceled()) {
+                    return finishCanceledInvocation(invocation, task);
+                }
+                runtimeResult = executeRuntime(invocation, task, snapshot);
+            }
+            AgentExecutionResult result = runtimeResult;
+            AgentContextPack contextPack = snapshot.contextPack();
             log.info(
                     "agent_crossing_perf event=business_agent_runtime durationMs={} userId={} invocationId={} taskId={} traceId={} agentId={} messages={}",
                     elapsedMs(runtimeStartedAt),
@@ -133,18 +159,29 @@ public class InvocationService {
                     task.traceId(),
                     task.agentId(),
                     result.messages().size());
-            InvocationUsage invocationUsage = persistInvocationUsage(invocation, task, result);
-            closeCallbackStream(invocation.invocationId());
+            InvocationUsage invocationUsage = executionStateService.withExistingExecution(
+                    task.taskId(), invocation.invocationId(), () -> {
+                        InvocationUsage saved = persistInvocationUsage(invocation, task, result);
+                        closeCallbackStream(invocation.invocationId());
+                        if (!isCanceled(invocation.invocationId(), task.taskId())) {
+                            persistAgentMessages(invocation, result);
+                        }
+                        return saved;
+                    });
             if (isCanceled(invocation.invocationId(), task.taskId())) {
                 return finishCanceledInvocation(invocation, task);
             }
-            persistAgentMessages(invocation, result);
             if (result.hasError()) {
                 throw new RuntimeException(result.errorOutput());
             }
-            rememberProviderSession(task, result);
-            completeAssistantStream(invocation, result.finalText());
-            acknowledgeInjectedContext(task, contextPack);
+            rememberProviderSession(task, invocation, result);
+            executionStateService.withExistingExecution(task.taskId(), invocation.invocationId(), () -> {
+                if (!isCanceled(invocation.invocationId(), task.taskId())) {
+                    completeAssistantStream(invocation, result.finalText());
+                    acknowledgeInjectedContext(task, contextPack);
+                }
+                return null;
+            });
             compactSessionIfNeeded(task, invocationUsage);
             // Keep the router's RUNNING/PROCESSING reservation until rotation has committed (or failed).
             // The visible answer is already final and can be included in the compression snapshot above.
@@ -157,12 +194,20 @@ public class InvocationService {
                 return finishCanceledInvocation(invocation, task);
             }
             if (completed.changed()) {
-                publishTask(completed.task());
-                threadStatusAggregator.refreshForTrace(completed.task().userId(), completed.task().traceId());
+                executionStateService.withExistingExecution(task.taskId(), invocation.invocationId(), () -> {
+                    publishTask(completed.task());
+                    threadStatusAggregator.refreshForTrace(completed.task().userId(), completed.task().traceId());
+                    return null;
+                });
             }
             return completed.invocation();
+        } catch (DeletedExecutionException deleted) {
+            throw deleted;
         } catch (RuntimeException exception) {
-            closeCallbackStream(invocation.invocationId());
+            executionStateService.withExistingExecution(task.taskId(), invocation.invocationId(), () -> {
+                closeCallbackStream(invocation.invocationId());
+                return null;
+            });
             if (isCanceled(invocation.invocationId(), task.taskId())) {
                 return finishCanceledInvocation(invocation, task);
             }
@@ -174,33 +219,31 @@ public class InvocationService {
             if (!failed.changed()) {
                 return failed.invocation();
             }
-            invocation = failed.invocation();
-            Task failedTask = failed.task();
-            publishTask(failedTask);
-            // 若已存在流式 assistant 行则原地标记 FAILED 并追加异常信息，否则新开一行。
-            String errorMessage = exception.getMessage();
-            ChatMessage existingAssistant = chatMessageRepository == null
-                    ? null
-                    : chatMessageRepository.findAssistantStreamByInvocationId(invocation.invocationId()).orElse(null);
-            if (existingAssistant != null) {
-                String appendOnFailure = existingAssistant.status() == ChatMessageStatus.FAILED ? null : errorMessage;
-                markAssistantStreamFinal(invocation.invocationId(), ChatMessageStatus.FAILED, appendOnFailure);
-            } else {
-                saveAssistantMessage(
-                        failedTask.traceId(),
-                        invocation.invocationId(),
-                        failedTask.taskId(),
-                        failedTask.agentId(),
-                        errorMessage,
-                        ChatMessageStatus.FAILED);
-            }
-            blockDependentDescendants(failedTask);
-            threadStatusAggregator.refreshForTrace(failedTask.userId(), failedTask.traceId());
-            return invocation;
-        } finally {
-            releaseClosedCallbackStream(invocation.invocationId());
-            taskDispatchSignal.signal();
+            return executionStateService.withExistingExecution(task.taskId(), invocation.invocationId(),
+                    () -> finishFailedInvocation(failed, exception));
         }
+    }
+
+    private Invocation finishFailedInvocation(ExecutionStateService.State failed, RuntimeException exception) {
+        Invocation invocation = failed.invocation();
+        Task failedTask = failed.task();
+        publishTask(failedTask);
+        // 若已存在流式 assistant 行则原地标记 FAILED 并追加异常信息，否则新开一行。
+        String errorMessage = exception.getMessage();
+        ChatMessage existingAssistant = chatMessageRepository == null
+                ? null
+                : chatMessageRepository.findAssistantStreamByInvocationId(invocation.invocationId()).orElse(null);
+        if (existingAssistant != null) {
+            String appendOnFailure = existingAssistant.status() == ChatMessageStatus.FAILED ? null : errorMessage;
+            markAssistantStreamFinal(invocation.invocationId(), ChatMessageStatus.FAILED, appendOnFailure);
+        } else {
+            saveAssistantMessage(
+                    failedTask.traceId(), invocation.invocationId(), failedTask.taskId(),
+                    failedTask.agentId(), errorMessage, ChatMessageStatus.FAILED);
+        }
+        blockDependentDescendants(failedTask);
+        threadStatusAggregator.refreshForTrace(failedTask.userId(), failedTask.traceId());
+        return invocation;
     }
 
     /**
@@ -218,17 +261,19 @@ public class InvocationService {
     }
 
     private Invocation finishCanceledInvocation(Invocation invocation, Task task) {
-        closeCallbackStream(invocation.invocationId());
         ExecutionStateService.State state = executionStateService.reconcileCancellation(task.taskId(), invocation.invocationId());
         if (!state.canceled()) {
             return state.invocation();
         }
-        Invocation canceled = state.invocation();
-        Task canceledTask = state.task();
-        markAssistantStreamFinal(canceled.invocationId(), ChatMessageStatus.CANCELED, null);
-        publishTask(canceledTask);
-        threadStatusAggregator.refreshForTrace(canceledTask.userId(), canceledTask.traceId());
-        return canceled;
+        return executionStateService.withExistingExecution(task.taskId(), invocation.invocationId(), () -> {
+            closeCallbackStream(invocation.invocationId());
+            Invocation canceled = state.invocation();
+            Task canceledTask = state.task();
+            markAssistantStreamFinal(canceled.invocationId(), ChatMessageStatus.CANCELED, null);
+            publishTask(canceledTask);
+            threadStatusAggregator.refreshForTrace(canceledTask.userId(), canceledTask.traceId());
+            return canceled;
+        });
     }
 
     private void closeCallbackStream(String invocationId) {
@@ -256,7 +301,7 @@ public class InvocationService {
         }
     }
 
-    private Invocation createInvocation(Task task) {
+    private Invocation newInvocation(Task task) {
         Instant now = Instant.now();
         Invocation invocation = new Invocation(
                 "invocation-" + UUID.randomUUID(),
@@ -268,7 +313,7 @@ public class InvocationService {
                 now,
                 null,
                 null);
-        return invocationRepository.save(invocation);
+        return invocation;
     }
 
     private AgentContextPack buildContextPack(Task task) {
@@ -277,6 +322,19 @@ public class InvocationService {
 
     private AgentExecutionSnapshot loadExecutionSnapshot(Task task) {
         return new AgentExecutionSnapshot(buildContextPack(task), findProviderSession(task));
+    }
+
+    private AgentExecutionSnapshot prepareExecutionSnapshot(Task task) {
+        return sessionCompressionService == null ? loadExecutionSnapshot(task)
+                : sessionCompressionService.prepareExecution(task, () -> loadExecutionSnapshot(task));
+    }
+
+    private AgentExecutionResult executeRuntime(Invocation invocation, Task task, AgentExecutionSnapshot snapshot) {
+        AgentSession session = snapshot.providerSession();
+        return agentRuntimeClient.execute(new AgentExecutionRequest(
+                invocation.invocationId(), invocation.userId(), task.taskId(), task.traceId(), task.agentId(),
+                task.context(), callbackBaseUrl, snapshot.contextPack(),
+                session == null ? null : session.providerSessionId(), session == null ? null : session.promptVersion()));
     }
 
     private void acknowledgeInjectedContext(Task task, AgentContextPack contextPack) {
@@ -298,7 +356,7 @@ public class InvocationService {
                 .orElse(null);
     }
 
-    private void rememberProviderSession(Task task, AgentExecutionResult result) {
+    private void rememberProviderSession(Task task, Invocation invocation, AgentExecutionResult result) {
         if (agentSessionRepository == null) {
             return;
         }
@@ -333,7 +391,8 @@ public class InvocationService {
         if (sessionCompressionService != null) {
             sessionCompressionService.rememberSession(task, threadId, session);
         } else {
-            agentSessionRepository.save(session);
+            executionStateService.withExistingExecution(task.taskId(), invocation.invocationId(),
+                    () -> agentSessionRepository.save(session));
         }
     }
 
@@ -392,6 +451,8 @@ public class InvocationService {
         }
         try {
             sessionCompressionService.compactIfNeeded(task, usage);
+        } catch (DeletedExecutionException deleted) {
+            throw deleted;
         } catch (RuntimeException exception) {
             // A summary failure must never change a successfully completed business invocation.
             log.warn("Session compression failed after invocation taskId={} agentId={}",

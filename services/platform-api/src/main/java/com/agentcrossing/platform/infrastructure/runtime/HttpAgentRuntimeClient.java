@@ -5,6 +5,7 @@ import com.agentcrossing.platform.application.invocation.AgentExecutionResult;
 import com.agentcrossing.platform.application.invocation.AgentExecutionUsage;
 import com.agentcrossing.platform.application.invocation.AgentMessage;
 import com.agentcrossing.platform.application.invocation.AgentMessageType;
+import com.agentcrossing.platform.application.invocation.PromptVersionChangedException;
 import java.time.Instant;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.HttpClientErrorException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +41,20 @@ public class HttpAgentRuntimeClient implements com.agentcrossing.platform.applic
                     .body(request)
                     .retrieve()
                     .body(AgentExecutionResponse.class);
+        } catch (HttpClientErrorException.Conflict exception) {
+            PromptVersionConflict responseBody;
+            try {
+                responseBody = exception.getResponseBodyAs(PromptVersionConflict.class);
+            } catch (RuntimeException malformed) {
+                throw exception; // An arbitrary/malformed 409 is not proof that no execution occurred.
+            }
+            if (responseBody != null && responseBody.detail() != null
+                    && "PROMPT_VERSION_CHANGED".equals(responseBody.detail().code())
+                    && responseBody.detail().currentPromptVersion() != null
+                    && !responseBody.detail().currentPromptVersion().isBlank()) {
+                throw new PromptVersionChangedException(responseBody.detail().currentPromptVersion());
+            }
+            throw exception;
         } catch (ResourceAccessException exception) {
             throw new IllegalStateException(
                     "Agent runtime execution timed out or could not be reached: " + exception.getMessage(), exception);
@@ -78,6 +94,9 @@ public class HttpAgentRuntimeClient implements com.agentcrossing.platform.applic
             return messages == null ? List.of() : messages.stream().map(AgentMessageDto::toAgentMessage).toList();
         }
     }
+
+    private record PromptVersionConflict(PromptVersionConflictDetail detail) {}
+    private record PromptVersionConflictDetail(String code, String currentPromptVersion) {}
 
     private record AgentMessageDto(
             String invocationId,

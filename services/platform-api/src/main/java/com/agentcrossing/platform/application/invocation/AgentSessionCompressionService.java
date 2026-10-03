@@ -7,6 +7,7 @@ import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
+import com.agentcrossing.platform.domain.message.ContextMessageReceipt;
 import com.agentcrossing.platform.domain.session.AgentSession;
 import com.agentcrossing.platform.domain.session.AgentSessionHistory;
 import com.agentcrossing.platform.domain.session.AgentSessionHistoryRepository;
@@ -18,10 +19,12 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -123,7 +126,7 @@ public class AgentSessionCompressionService {
         ReentrantLock lock = sessionLock(task.userId(), threadId, task.agentId(), session.provider());
         lock.lock();
         try {
-            inTransaction(() -> {
+            inTaskTransaction(task, () -> {
                 // The upsert serializes MySQL writers; commit both pointer and history before unlocking.
                 AgentSession savedSession = agentSessionRepository.save(session);
                 if (!rememberHistory(task, threadId, savedSession)) {
@@ -189,22 +192,48 @@ public class AgentSessionCompressionService {
         ReentrantLock lock = sessionLock(task.userId(), threadId, task.agentId(), usage.provider());
         lock.lock();
         try {
-            compact(task, threadId, usage);
+            compact(task, threadId, new Rotation(usage.provider(), usage.providerSessionId(), usage.contextInputTokens(), false));
         } finally {
             lock.unlock();
         }
     }
 
-    private void compact(Task task, String threadId, InvocationUsage usage) {
-        CompressionPlan plan = inTransaction(() -> prepareCompression(task, threadId, usage));
+    /** Prompt changes require a handoff even when automatic token compaction is disabled or below threshold. */
+    public void rotateForPromptChange(Task task, AgentSession rejectedSession) {
+        if (!BUSINESS_AGENTS.contains(task.agentId())) {
+            throw new IllegalArgumentException("Prompt rotation is only supported for business agents");
+        }
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Session compression must run outside a database transaction");
+        }
+        String threadId = findThreadId(task);
+        if (threadId == null) {
+            throw new DeletedExecutionException(task.taskId());
+        }
+        ReentrantLock lock = sessionLock(task.userId(), threadId, task.agentId(), rejectedSession.provider());
+        lock.lock();
+        try {
+            compact(task, threadId, new Rotation(rejectedSession.provider(), rejectedSession.providerSessionId(), null, true));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private record Rotation(String provider, String providerSessionId, Long contextTokens, boolean promptChanged) {
+        String reason() { return promptChanged ? "PROMPT_VERSION_CHANGED" : "TOKEN_THRESHOLD"; }
+    }
+
+    private void compact(Task task, String threadId, Rotation rotation) {
+        CompressionPlan plan = inTaskTransaction(task, () -> prepareCompression(task, threadId, rotation));
         if (plan == null) {
             return;
         }
         try {
             // COMPACTING is already committed; no database connection is held while calling the model.
-            SessionCompressionResult result = compressionClient.compress(plan.request());
-            String summary = toJson(result.startupSummary());
-            boolean rotated = inTransaction(() -> {
+            // A short/already summarized history needs no model call, but still needs a new generation and tail.
+            SessionCompressionResult result = plan.request().messages().isEmpty() ? null : compressionClient.compress(plan.request());
+            String summary = result == null ? plan.active().startupSummary() : toJson(result.startupSummary());
+            boolean rotated = inTaskTransaction(task, () -> {
                 AgentSessionHistory current = historyRepository
                         .findBySessionRecordId(plan.active().sessionRecordId()).orElse(null);
                 if (!plan.ownsReservation(current)) {
@@ -213,22 +242,28 @@ public class AgentSessionCompressionService {
                 Instant now = Instant.now();
                 AgentSessionHistory pending = new AgentSessionHistory(
                         "session-record-" + UUID.randomUUID(), task.userId(), threadId, task.traceId(), task.agentId(),
-                        usage.provider(), null, current.generation() + 1, AgentSessionHistoryStatus.CREATING,
+                        rotation.provider(), null, current.generation() + 1, AgentSessionHistoryStatus.CREATING,
                         current.sessionRecordId(), summary, plan.compactedStartId(), plan.compactedEndId(),
-                        plan.tailFirstId(), null, summaryModel, result.summaryPromptVersion(),
-                        "TOKEN_THRESHOLD", null, now, null, null);
-                historyRepository.save(current.supersede(usage.contextInputTokens(), now));
+                        plan.tailFirstId(), null, result == null ? current.summaryModel() : summaryModel,
+                        result == null ? current.summaryPromptVersion() : result.summaryPromptVersion(),
+                        rotation.reason(), null, now, null, null);
+                historyRepository.save(current.supersede(rotation.contextTokens(), now));
                 historyRepository.save(pending);
-                agentSessionRepository.delete(task.userId(), threadId, task.agentId(), usage.provider());
+                // The summary covers only these exact snapshots, never a late-completing/revised row.
+                chatMessageRepository.acknowledgeSummarizedMessages(task.userId(), threadId, task.agentId(),
+                        plan.request().messages().stream()
+                                .map(message -> ContextMessageReceipt.of(message.messageId(), message.content()))
+                                .toList(), plan.active().startupSummary() == null);
+                agentSessionRepository.delete(task.userId(), threadId, task.agentId(), rotation.provider());
                 return true;
             });
             if (rotated) {
-                log.info("Business session compressed userId={} threadId={} agentId={} generation={} contextTokens={}",
-                        task.userId(), threadId, task.agentId(), plan.active().generation() + 1, usage.contextInputTokens());
+                log.info("Business session rotated userId={} threadId={} agentId={} generation={} reason={} contextTokens={}",
+                        task.userId(), threadId, task.agentId(), plan.active().generation() + 1, rotation.reason(), rotation.contextTokens());
             }
         } catch (RuntimeException | Error failure) {
             try {
-                inTransaction(() -> {
+                inTaskTransaction(task, () -> {
                     historyRepository.findBySessionRecordId(plan.active().sessionRecordId())
                             .filter(plan::ownsReservation)
                             .ifPresent(history -> historyRepository.save(history.withStatus(AgentSessionHistoryStatus.ACTIVE)));
@@ -241,8 +276,8 @@ public class AgentSessionCompressionService {
         }
     }
 
-    private CompressionPlan prepareCompression(Task task, String threadId, InvocationUsage usage) {
-        String provider = usage.provider();
+    private CompressionPlan prepareCompression(Task task, String threadId, Rotation rotation) {
+        String provider = rotation.provider();
         if (historyRepository.findCreating(task.userId(), threadId, task.agentId(), provider).isPresent()
                 || historyRepository.findCompacting(task.userId(), threadId, task.agentId(), provider).isPresent()) {
             return null;
@@ -250,8 +285,11 @@ public class AgentSessionCompressionService {
         AgentSession currentSession = agentSessionRepository
                 .findByThreadId(task.userId(), threadId, task.agentId(), provider)
                 .orElse(null);
-        if (currentSession == null || (usage.providerSessionId() != null
-                && !usage.providerSessionId().equals(currentSession.providerSessionId()))) {
+        if (currentSession == null || (rotation.providerSessionId() != null
+                && !rotation.providerSessionId().equals(currentSession.providerSessionId()))) {
+            if (rotation.promptChanged()) {
+                throw new IllegalStateException("Provider session changed before prompt rotation");
+            }
             return null;
         }
         AgentSessionHistory active = historyRepository
@@ -262,11 +300,17 @@ public class AgentSessionCompressionService {
                 .filter(message -> message.role() == ChatMessageRole.USER || message.role() == ChatMessageRole.ASSISTANT)
                 .toList();
         int tailStart = tailStart(messages);
-        int compactStart = indexAfter(messages, active.compactedEndMessageId());
-        if (compactStart >= tailStart) {
+        Map<String, String> summarizedVersions = active.startupSummary() == null ? Map.of() : chatMessageRepository
+                .findSummarizedContextMessages(task.userId(), threadId, task.agentId()).stream()
+                .collect(Collectors.toMap(ContextMessageReceipt::messageId, ContextMessageReceipt::contentVersion));
+        // A creation-time boundary would skip early messages completed/revised after the last summary.
+        List<ChatMessage> compacted = messages.subList(0, tailStart).stream()
+                .filter(message -> !ContextMessageReceipt.of(message.messageId(), message.content()).contentVersion()
+                        .equals(summarizedVersions.get(message.messageId())))
+                .toList();
+        if (compacted.isEmpty() && !rotation.promptChanged()) {
             return null;
         }
-        List<ChatMessage> compacted = messages.subList(compactStart, tailStart);
         List<SessionCompressionRequest.CompressionMessage> compressionMessages = compacted.stream()
                 .map(message -> new SessionCompressionRequest.CompressionMessage(
                         message.messageId(), message.role().wireValue(), message.agentId(), message.taskId(),
@@ -276,15 +320,18 @@ public class AgentSessionCompressionService {
                 .findByTraceIdAndUserId(task.traceId(), task.userId()).stream()
                 .map(item -> new SessionCompressionRequest.CompressionTask(
                         item.taskId(), item.agentId(),
-                        item.taskId().equals(task.taskId()) ? "COMPLETED" : item.status().name(), item.context()))
+                        !rotation.promptChanged() && item.taskId().equals(task.taskId())
+                                ? "COMPLETED" : item.status().name(), item.context()))
                 .toList();
         SessionCompressionRequest request = new SessionCompressionRequest(
                 task.userId(), threadId, task.traceId(), task.agentId(), provider,
                 active.generation() + 1, active.startupSummary(), compressionMessages, tasks);
         ChatMessage tailFirst = tailStart < messages.size() ? messages.get(tailStart) : null;
         historyRepository.save(active.withStatus(AgentSessionHistoryStatus.COMPACTING));
-        return new CompressionPlan(active, request, compacted.getFirst().messageId(),
-                compacted.getLast().messageId(), tailFirst == null ? null : tailFirst.messageId());
+        return new CompressionPlan(active, request,
+                compacted.isEmpty() ? active.compactedStartMessageId() : compacted.getFirst().messageId(),
+                compacted.isEmpty() ? active.compactedEndMessageId() : compacted.getLast().messageId(),
+                tailFirst == null ? null : tailFirst.messageId());
     }
 
     private record CompressionPlan(AgentSessionHistory active, SessionCompressionRequest request,
@@ -306,6 +353,17 @@ public class AgentSessionCompressionService {
 
     private <T> T inTransaction(Supplier<T> action) {
         return transactionTemplate == null ? action.get() : transactionTemplate.execute(status -> action.get());
+    }
+
+    private <T> T inTaskTransaction(Task task, Supplier<T> action) {
+        // Always session lock -> task lock. The remote summary is outside both the task lock and transaction.
+        synchronized (taskRepository) {
+            return inTransaction(() -> {
+                taskRepository.findByTaskIdForUpdate(task.taskId())
+                        .orElseThrow(() -> new DeletedExecutionException(task.taskId()));
+                return action.get();
+            });
+        }
     }
 
     private boolean shouldCompact(Task task, InvocationUsage usage) {
@@ -345,18 +403,6 @@ public class AgentSessionCompressionService {
             }
         }
         return start;
-    }
-
-    private static int indexAfter(List<ChatMessage> messages, String messageId) {
-        if (messageId == null) {
-            return 0;
-        }
-        for (int index = 0; index < messages.size(); index++) {
-            if (messages.get(index).messageId().equals(messageId)) {
-                return index + 1;
-            }
-        }
-        return 0;
     }
 
     private String toJson(Object value) {

@@ -233,6 +233,18 @@ completion/cancellation through the same repository monitor and uses atomic per-
 Task status events and runtime cancellation requests are sent after the state transaction commits; runtime
 execution and session compression do not hold that transaction open. No schema change is needed.
 
+Thread deletion and runtime-result persistence also coordinate on the parent Task. Result writes
+lock that row with `SELECT ... FOR UPDATE` and verify the Invocation inside the same short transaction;
+deletion locks all trace Tasks (including terminal ones) before collecting/deleting their child rows.
+If the writer wins, deletion removes its committed usage; if deletion wins, finalization stops and
+discards buffered output without recreating usage, messages, or session state. Memory mode holds the
+shared Task repository monitor through commit. Deletion and result transactions use `READ_COMMITTED`
+so child queries see writes committed while waiting for a parent or callback lock. Session reservation,
+rotation, and restore also check/lock their Task; the remote execution and summary remain outside these
+transactions. This fix adds no schema migration and does not clean previously orphaned records.
+It protects these coordinated application paths, not arbitrary direct repository/SQL writes; streaming
+callbacks racing thread deletion are a separate follow-up (their stream lock is not the Task lock).
+
 Agent Runtime records cancellation before looking for an active execution. Cancellation and execution
 registration share one lock, so an execute request arriving after cancellation does not start a Provider.
 Markers use a monotonic-clock TTL configured by `AGENT_RUNTIME_CANCELLATION_TTL_SECONDS` (default 300,
@@ -242,6 +254,39 @@ cleanup do not consume the marker; expired entries are reclaimed on the next exe
 The cancellation endpoint's `accepted: true` means the request was recorded, not that a CLI was already
 running or has finished exiting. This protection is local to one Runtime process and does not survive
 restart or coordinate multiple workers; those deployments need shared cancellation state.
+
+### Incremental context delivery
+
+Business agents receive only completed user messages and completed replies from other agents.
+`agent_context_message_receipt` records the SHA-256 content fingerprint actually injected for each
+`userId + threadId + agentId + messageId`. A streaming message is not acknowledged, and a later
+completion or content revision remains eligible even if newer messages have already been delivered.
+Acknowledgment uses the sent snapshot, never a reread after execution. The latest 20 eligible messages
+are returned in creation order; messages outside the batch stay unacknowledged for subsequent runs.
+Receipt storage grows with delivered messages per agent, not with the number of streaming chunks.
+Reads return bounded message bodies, but may scan the thread's historical metadata when few or no
+unacknowledged versions remain; they intentionally do not use an unsafe global position watermark.
+
+Successful session rotation acknowledges only the exact messages covered by its summary, in the short
+rotation transaction. Receipts separately track `summarized_version`: subsequent summaries include
+new or changed versions even before the previous summary's creation-time boundary, without repeatedly
+summarizing unchanged history. When no previous summary is inherited, that coverage is reset in the
+rotation transaction. Startup tail messages are acknowledged after their actual injection. Replies
+that finish during summary generation, including replies created before the retained tail, remain
+eligible in the startup pack as well as subsequent invocations. Message deletion cascades to receipts; late acknowledgments do
+not recreate receipts for deleted messages.
+
+MySQL rollout is additive: `schema-mysql.sql` adds the receipt table and a stored generated
+`chat_message.context_version` fingerprint, leaving the HTTP message shape unchanged. The stored
+fingerprint avoids rehashing historical message bodies during reads and stays correct for older
+writers as well (see [MySQL generated columns](https://dev.mysql.com/doc/refman/8.0/en/create-table-generated-columns.html)).
+Adding a stored generated column can rebuild/lock an existing table: back up the database and apply
+this schema in a maintenance window before starting the updated API, especially for large histories.
+The initializer is idempotent. Existing `agent_context_cursor` rows are retained for diagnostics and
+code rollback, but do not seed receipts: the old position cannot prove final content was delivered.
+Consequently, an upgraded session can replay historical messages until those versions are acknowledged.
+Rollback means restoring the previous API build while leaving the additive table/column in place;
+do not drop receipts during rollback (the old delivery bug also returns with the old build).
 
 ### Late streaming callbacks
 
@@ -261,6 +306,27 @@ This synchronization, like the stream buffer, is local to one platform-api proce
 a multi-instance coordination mechanism. No database schema change is required.
 
 ### Token usage and session compression
+
+Business-agent static Prompt changes use the same durable session handoff as token-triggered rotation.
+If a resumed session's `providerPromptVersion` differs from the loaded static Prompt (including legacy
+sessions with no version), Runtime rejects `/api/runtime/execute` with HTTP 409 and
+`{"detail":{"code":"PROMPT_VERSION_CHANGED","currentPromptVersion":"<hash>"}}` **before** starting
+the CLI or callbacks. It never silently clears the session ID and executes incremental-only context.
+Platform API then reserves `COMPACTING`, merges the active startup summary with unsummarized history,
+and prepares a `CREATING` generation with a retained tail and `rotation_reason=PROMPT_VERSION_CHANGED`.
+It rebuilds the context snapshot and retries once without a provider session ID, so the latest static
+Prompt, startup summary, and tail are injected together. Other HTTP errors/timeouts are not retried.
+
+Prompt handoff is required even below the token threshold or when automatic token compaction is disabled.
+If history fits in the tail, or the older prefix is already summarized, the existing summary and tail
+are preserved without another model call. Summary failure keeps the old session/history active and
+fails this task instead of starting a contextless session. Cancellation/deletion during preparation
+prevents the retry; remote summarization remains outside database transactions. Only persisted chat
+history and summaries can be recovered, not unreported provider-internal state.
+
+Deploy Runtime and Platform API together before changing Prompts. A new Runtime with an old API fails
+safely on the 409 but cannot perform automatic recovery; an old Runtime still has the silent reset bug.
+No new database schema is needed for this handoff. Rolling back Runtime restores its old reset behavior.
 
 `totalInputTokens` records aggregate input consumption for an invocation. Compression uses only
 `EXACT` usage with a known `contextInputTokens`, preferring `lastRequestInputTokens` when supplied.
@@ -391,6 +457,7 @@ Current durable tables include:
 - `realtime_event`
 - `agent_session`
 - `agent_context_cursor`
+- `agent_context_message_receipt`
 - `agent_card`
 
 The same application layer can also run with in-memory repositories for lightweight development.

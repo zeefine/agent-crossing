@@ -94,6 +94,15 @@
         SELECT * FROM task WHERE task_id = #{taskId}
     </select>
 
+    <select id="findByTaskIdForUpdate" resultMap="TaskResultMap">
+        SELECT * FROM task WHERE task_id = #{taskId} FOR UPDATE
+    </select>
+
+    <select id="findByTraceIdAndUserIdForUpdate" resultMap="TaskResultMap">
+        SELECT * FROM task WHERE trace_id = #{traceId} AND user_id = #{userId}
+        ORDER BY task_id ASC FOR UPDATE
+    </select>
+
     <select id="findByTaskIdAndUserId" resultMap="TaskResultMap">
         SELECT * FROM task WHERE task_id = #{taskId} AND user_id = #{userId}
     </select>

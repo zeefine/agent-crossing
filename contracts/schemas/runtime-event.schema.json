@@ -3,6 +3,23 @@
   "$id": "https://agent-crossing.local/schemas/runtime-event.schema.json",
   "title": "RuntimeContracts",
   "$defs": {
+    "PromptVersionConflictResponse": {
+      "description": "HTTP 409 from /api/runtime/execute before any CLI or callback starts. Recover session context before retrying; other errors are not safe to retry automatically.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detail"],
+      "properties": {
+        "detail": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "currentPromptVersion"],
+          "properties": {
+            "code": {"const": "PROMPT_VERSION_CHANGED"},
+            "currentPromptVersion": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
     "AgentExecutionRequest": {
       "$comment": "MODEL_SYNC(AgentExecutionRequest) — 改字段时三处同步（无 codegen）: contracts/schemas/runtime-event.schema.json ($defs/AgentExecutionRequest) | services/platform-api/src/main/java/com/agentcrossing/platform/application/invocation/AgentExecutionRequest.java | services/agent-runtime/src/agent_runtime/contracts/models.py (class AgentExecutionRequest)",
       "type": "object",

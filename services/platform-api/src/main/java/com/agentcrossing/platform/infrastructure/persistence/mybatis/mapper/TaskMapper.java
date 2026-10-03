@@ -20,6 +20,10 @@ public interface TaskMapper {
 
     Task findByTaskId(@Param("taskId") String taskId);
 
+    Task findByTaskIdForUpdate(@Param("taskId") String taskId);
+
+    List<Task> findByTraceIdAndUserIdForUpdate(@Param("traceId") String traceId, @Param("userId") String userId);
+
     Task findByTaskIdAndUserId(@Param("taskId") String taskId, @Param("userId") String userId);
 
     List<Task> findByTraceId(@Param("traceId") String traceId);

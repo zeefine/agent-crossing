@@ -77,6 +77,15 @@ public class AssistantStreamBuffer {
         });
     }
 
+    /** A deleted parent must never be recreated by flushing the in-memory tail. */
+    public void closeCallbacksAndDiscard(String invocationId) {
+        withInvocationLock(invocationId, () -> {
+            closedCallbacks.add(invocationId);
+            buffers.remove(invocationId);
+            return null;
+        });
+    }
+
     /** Only release after the durable invocation is terminal (or deleted); its status then guards late calls. */
     public void forgetClosedCallbacks(String invocationId) {
         closedCallbacks.remove(invocationId);

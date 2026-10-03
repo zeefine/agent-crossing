@@ -16,7 +16,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** Short state-only transactions. Runtime calls and event publication must stay outside this service. */
+/** Short state/result transactions coordinated with thread deletion. Never wrap remote calls. */
 @Service
 public class ExecutionStateService {
     private static final Set<TaskStatus> ACTIVE_TASKS = Set.of(TaskStatus.QUEUED, TaskStatus.PROCESSING);
@@ -34,6 +34,9 @@ public class ExecutionStateService {
     void setTransactionManager(PlatformTransactionManager manager) {
         transactions = new TransactionTemplate(manager);
         transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        // Result finalization may wait for an accepted callback's commit after reading the invocation.
+        // Parent row locks provide exclusion; fresh reads must see that callback's newly created message.
+        transactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
 
     public State start(String taskId, String invocationId) {
@@ -47,6 +50,20 @@ public class ExecutionStateService {
                 invocations.updateStatusIfCurrent(invocationId, Set.of(InvocationStatus.QUEUED), InvocationStatus.RUNNING);
             }
             return read(taskId, invocationId, false);
+        });
+    }
+
+    public <T> T withExistingTask(String taskId, Supplier<T> operation) {
+        return atomic(() -> {
+            tasks.findByTaskIdForUpdate(taskId).orElseThrow(() -> new DeletedExecutionException(taskId));
+            return operation.get();
+        });
+    }
+
+    public <T> T withExistingExecution(String taskId, String invocationId, Supplier<T> operation) {
+        return atomic(() -> {
+            read(taskId, invocationId, false);
+            return operation.get();
         });
     }
 
@@ -124,9 +141,9 @@ public class ExecutionStateService {
     }
 
     private State read(String taskId, String invocationId, boolean changed) {
-        Task task = tasks.findByTaskId(taskId).orElseThrow(() -> new IllegalArgumentException("Task not found: " + taskId));
+        Task task = tasks.findByTaskIdForUpdate(taskId).orElseThrow(() -> new DeletedExecutionException(taskId));
         Invocation invocation = invocations.findByInvocationId(invocationId)
-                .orElseThrow(() -> new IllegalArgumentException("Invocation not found: " + invocationId));
+                .orElseThrow(() -> new DeletedExecutionException(invocationId));
         if (!invocation.taskId().equals(taskId) || !invocation.userId().equals(task.userId())) {
             throw new IllegalArgumentException("Invocation does not belong to task");
         }

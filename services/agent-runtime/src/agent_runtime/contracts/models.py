@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -201,6 +201,17 @@ class AgentExecutionResponse(ContractModel):
     last_sequence: int | None = Field(default=None, alias="lastSequence")
     prompt_version: str | None = Field(default=None, alias="promptVersion")
     usage: AgentExecutionUsage | None = None
+
+
+class PromptVersionConflictDetail(ContractModel):
+    code: Literal["PROMPT_VERSION_CHANGED"] = "PROMPT_VERSION_CHANGED"
+    current_prompt_version: str = Field(alias="currentPromptVersion", min_length=1)
+
+
+class PromptVersionConflictResponse(ContractModel):
+    """HTTP 409 before CLI/callback side effects; platform must restore context before retry."""
+
+    detail: PromptVersionConflictDetail
 
 
 class SessionCompressionMessage(ContractModel):

@@ -27,6 +27,17 @@ public class InMemoryTaskRepository implements TaskRepository {
     }
 
     @Override
+    public Optional<Task> findByTaskIdForUpdate(String taskId) {
+        return findByTaskId(taskId);
+    }
+
+    @Override
+    public List<Task> findByTraceIdAndUserIdForUpdate(String traceId, String userId) {
+        return findByTraceIdAndUserId(traceId, userId).stream()
+                .sorted(java.util.Comparator.comparing(Task::taskId)).toList();
+    }
+
+    @Override
     public Optional<Task> findByTaskIdAndUserId(String taskId, String userId) {
         return findByTaskId(taskId).filter(task -> task.userId().equals(userId));
     }

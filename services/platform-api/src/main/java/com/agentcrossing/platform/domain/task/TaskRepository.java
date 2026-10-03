@@ -9,6 +9,12 @@ public interface TaskRepository {
 
     Optional<Task> findByTaskId(String taskId);
 
+    /** Lock the parent row until commit; callers must use a transaction (repository monitor in memory mode). */
+    Optional<Task> findByTaskIdForUpdate(String taskId);
+
+    /** Lock all trace tasks, including terminal ones, before deleting their dependent records. */
+    List<Task> findByTraceIdAndUserIdForUpdate(String traceId, String userId);
+
     Optional<Task> findByTaskIdAndUserId(String taskId, String userId);
 
     List<Task> findByTraceId(String traceId);

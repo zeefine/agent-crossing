@@ -8,10 +8,13 @@ import com.agentcrossing.platform.domain.message.ChatMessage;
 import com.agentcrossing.platform.domain.message.ChatMessageRepository;
 import com.agentcrossing.platform.domain.message.ChatMessageRole;
 import com.agentcrossing.platform.domain.message.ChatMessageStatus;
+import com.agentcrossing.platform.domain.message.ContextMessageReceipt;
 import com.agentcrossing.platform.domain.session.AgentSessionHistory;
 import com.agentcrossing.platform.domain.session.AgentSessionHistoryRepository;
 import com.agentcrossing.platform.domain.task.Task;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -61,19 +64,26 @@ public class AgentContextService {
                 : agentRegistry.findAll().stream().map(AvailableAgentContext::from).toList();
         AgentSessionHistory pending = findPendingHistory(task);
         List<IncrementalChatMessage> incrementalMessages = chatThreadRepository.findByTraceId(task.traceId())
+                .filter(thread -> thread.userId().equals(task.userId()))
                 .map(thread -> {
-                    if (pending != null) {
-                        return retainedTail(thread.threadId(), pending);
-                    }
-                    AgentContextCursor cursor = agentContextCursorRepository
-                            .find(task.userId(), thread.threadId(), task.agentId())
-                            .orElse(null);
-                    List<ChatMessage> visibleMessages = chatMessageRepository.findVisibleMessagesAfterCursor(
+                    List<ChatMessage> visibleMessages = chatMessageRepository.findUnacknowledgedVisibleMessages(
+                            task.userId(),
                             thread.threadId(),
                             task.agentId(),
-                            cursor == null ? null : cursor.lastInjectedCreatedAt(),
-                            cursor == null ? null : cursor.lastInjectedMessageId(),
                             DEFAULT_INCREMENTAL_MESSAGE_LIMIT);
+                    if (pending != null) {
+                        // A reply may finish before the tail boundary while the summary is being built.
+                        // Include unacknowledged versions even before the new provider session is activated.
+                        var startupMessages = new LinkedHashMap<String, IncrementalChatMessage>();
+                        retainedTail(thread.threadId(), pending)
+                                .forEach(message -> startupMessages.put(message.messageId(), message));
+                        visibleMessages.stream().map(this::toIncrementalChatMessage)
+                                .forEach(message -> startupMessages.putIfAbsent(message.messageId(), message));
+                        return startupMessages.values().stream()
+                                .sorted(Comparator.comparing((IncrementalChatMessage message) -> Instant.parse(message.createdAt()))
+                                        .thenComparing(IncrementalChatMessage::messageId))
+                                .toList();
+                    }
                     return visibleMessages.stream()
                             .map(this::toIncrementalChatMessage)
                             .toList();
@@ -89,14 +99,21 @@ public class AgentContextService {
             return;
         }
         IncrementalChatMessage last = messages.getLast();
-        chatThreadRepository.findByTraceId(task.traceId()).ifPresent(thread -> agentContextCursorRepository.save(
-                new AgentContextCursor(
+        chatThreadRepository.findByTraceId(task.traceId())
+                .filter(thread -> thread.userId().equals(task.userId())).ifPresent(thread -> {
+            chatMessageRepository.acknowledgeContextMessages(task.userId(), thread.threadId(), task.agentId(),
+                    messages.stream().map(message -> ContextMessageReceipt.of(message.messageId(), message.content()))
+                            .toList());
+            // Retain the legacy position for diagnostics/rollback; it is no longer a delivery watermark.
+            agentContextCursorRepository.save(
+                    new AgentContextCursor(
                         task.userId(),
                         thread.threadId(),
                         task.agentId(),
                         Instant.parse(last.createdAt()),
                         last.messageId(),
-                        Instant.now())));
+                        Instant.now()));
+        });
     }
 
     private IncrementalChatMessage toIncrementalChatMessage(ChatMessage message) {
@@ -114,6 +131,7 @@ public class AgentContextService {
             return null;
         }
         return chatThreadRepository.findByTraceId(task.traceId())
+                .filter(thread -> thread.userId().equals(task.userId()))
                 .flatMap(thread -> agentSessionHistoryRepository.findCreating(
                         task.userId(), thread.threadId(), task.agentId(), task.agentId()))
                 .orElse(null);

@@ -171,13 +171,30 @@ class AssistantStreamBufferTests {
         }
 
         @Override
-        public List<ChatMessage> findVisibleMessagesAfterCursor(
+        public List<ChatMessage> findUnacknowledgedVisibleMessages(
+                String userId,
                 String threadId,
                 String currentAgentId,
-                Instant lastInjectedCreatedAt,
-                String lastInjectedMessageId,
                 int limit) {
             return List.of();
+        }
+
+        @Override
+        public void acknowledgeContextMessages(String userId, String threadId, String agentId,
+                List<com.agentcrossing.platform.domain.message.ContextMessageReceipt> receipts) {
+            throw new UnsupportedOperationException("Stream buffer must not acknowledge context");
+        }
+
+        @Override
+        public void acknowledgeSummarizedMessages(String userId, String threadId, String agentId,
+                List<com.agentcrossing.platform.domain.message.ContextMessageReceipt> receipts, boolean replacePreviousSummary) {
+            throw new UnsupportedOperationException("Stream buffer must not acknowledge summaries");
+        }
+
+        @Override
+        public List<com.agentcrossing.platform.domain.message.ContextMessageReceipt> findSummarizedContextMessages(
+                String userId, String threadId, String agentId) {
+            throw new UnsupportedOperationException("Stream buffer must not read summaries");
         }
 
         @Override
