@@ -58,3 +58,6 @@ spec/
 
 # Local interview materials
 docs/agent-crossing-interview-playbook.md
+
+# Local-only documentation
+/docs/local/runtime-notes.md
