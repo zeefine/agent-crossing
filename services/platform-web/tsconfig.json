@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["./*"] },
     "target": "ES2022",
     "lib": ["dom", "dom.iterable", "es2022"],
     "allowJs": false,

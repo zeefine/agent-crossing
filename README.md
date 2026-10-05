@@ -78,7 +78,7 @@ CLI agents and model providers
 | `services/agent-runtime` | FastAPI, Pydantic, FastMCP | Runtime adapter layer for MasterAgent, OpenCode, ClaudeCode, Codex, provider stdout/JSON parsing, and MCP tools. |
 | `services/platform-web` | Next.js, React, TypeScript | Chat workspace, agent status, WebSocket updates, and task DAG visualization. |
 | `contracts` | JSON Schema | Cross-language request, response, task, invocation, and realtime event contracts. |
-| `scripts` | Bash | Local dev startup, shutdown, test, and lint helpers. |
+| `scripts` | Bash + Python standard library | Local dev startup, shutdown, test, and lint helpers. |
 | `docs` | Markdown | Operational notes and implementation pitfalls. |
 
 ---
@@ -92,6 +92,7 @@ CLI agents and model providers
 - Node.js + npm
 - Python 3.11+
 - `uv`
+- `python3`, `ps` and `curl` available on PATH for the macOS/Linux lifecycle scripts
 - MySQL 8+ if running with the `mysql` Spring profile
 - Installed and authenticated CLI agents:
   - `opencode`
@@ -129,6 +130,25 @@ MYSQL_PASSWORD=<mysql-password>
 ./scripts/dev-up.sh
 ```
 
+Startup checks MySQL before launching application services when the `mysql` profile
+or MySQL storage mode is enabled. It waits for a MySQL server greeting, not just an
+open TCP port; database credentials and schema are still validated by the Java backend.
+`SPRING_DATASOURCE_URL`, when set, takes precedence over `MYSQL_SERVER`/`MYSQL_PORT`
+for this check (single-host `jdbc:mysql://` URLs are supported).
+
+MySQL is **not started automatically by default**. To explicitly allow starting an
+existing local Docker container, add `DEV_MYSQL_CONTAINER=mysql` to `.env`, replacing
+`mysql` with its actual name. The script verifies the published port, starts it only
+if stopped, and waits for its Docker health check when one exists. It never creates
+containers or stops MySQL during application rollback/shutdown.
+
+Timeouts in `.env` are seconds: `DEV_MYSQL_TIMEOUT=30`, `DEV_READY_TIMEOUT=60`
+(per service), `DEV_HTTP_TIMEOUT=2` (per HTTP probe), `DEV_STOP_TIMEOUT=10`, and
+`DEV_INSTALL_TIMEOUT=180` (initial runtime dependency sync). HTTP probes have both
+connection and overall timeouts. Startup failure or Ctrl+C/TERM rolls back only
+application services started by that invocation, in reverse order; existing
+services are preserved. Re-running startup checks existing services' health.
+
 Then open:
 
 ```text
@@ -141,11 +161,34 @@ http://127.0.0.1:3000
 ./scripts/dev-down.sh
 ```
 
+Both entry points use the standard-library-only `scripts/dev_services.py` manager.
+Each application runs in a dedicated process group with a persistent supervisor,
+so stopping Maven/npm also terminates their ordinary child processes. Shutdown
+tries TERM before KILL after the configured grace period and checks that the group
+has exited. Programs deliberately creating a separate session are outside this
+process-group boundary.
+
+The manager records PID, process group, start time, project identity and a unique
+launch token in `run/<service>.json`; `.pid` files are retained for inspection but
+are not trusted for signaling. Legacy live PID files, identity mismatches, or
+orphaned groups (for example after manually killing a supervisor with SIGKILL)
+cause a safe refusal: inspect the reported metadata and process manually instead
+of deleting records and blindly killing PIDs. A process lock prevents overlapping
+startup/shutdown operations. Shutdown uses the recorded grace period and does not
+source `.env`, so it remains usable if that file is missing or broken.
+
 Logs and pid files are written to ignored local directories:
 
 ```text
 logs/
 run/
+```
+
+Service logs are appended rather than overwritten. Lifecycle regression tests run
+only temporary fake services on ephemeral ports (no real agents, Docker or database):
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
 ```
 
 ---
@@ -184,6 +227,34 @@ npm install
 npm run dev
 npm run build
 ```
+
+### Frontend component system
+
+The collaboration workspace uses **shadcn/ui + Tailwind CSS 4**, with locally
+owned components in `services/platform-web/components/ui` and business compositions
+in `components/workspace`. `app/globals.css` owns light/dark semantic tokens and
+workspace layout. Theme selection defaults to the system and is remembered across reloads.
+React Flow and Lucide remain the task graph and icon foundations.
+
+Use existing components and semantic tokens for new controls. Generate additional
+components from `services/platform-web` using `npx shadcn@latest add <component>`;
+review generated changes for React 18 ref compatibility. Do not overwrite project
+customizations blindly. See [the component-system decision](docs/decisions/001-web-component-system.md).
+
+```bash
+cd services/platform-web
+npm ci
+npx playwright install chromium
+npm run lint
+npm run typecheck
+npm test
+npm run build
+PLAYWRIGHT_PRODUCTION=1 npm test
+```
+
+Browser tests start an isolated frontend on port 3100 and mock the platform API and
+WebSocket. They do not launch real agents or modify real threads. Test screenshots
+and traces are generated under the ignored `test-results/` directory.
 
 ---
 

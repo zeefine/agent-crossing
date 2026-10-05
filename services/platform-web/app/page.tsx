@@ -12,10 +12,12 @@ import {
   GitBranch,
   Loader2,
   Plus,
-  Send,
+  ArrowUp,
+  ArrowDown,
   Square,
   Sparkles,
-  Trash2,
+  Menu,
+  X,
   UserRound,
   XCircle
 } from "lucide-react";
@@ -27,7 +29,9 @@ import {
   Handle,
   MarkerType,
   Position,
-  ReactFlow
+  ReactFlow,
+  useReactFlow,
+  useStore
 } from "@xyflow/react";
 import type { Edge, Node, NodeProps } from "@xyflow/react";
 import dagre from "dagre";
@@ -50,8 +54,19 @@ import {
 } from "../lib/api";
 import { REALTIME_EVENT_TYPES } from "../lib/realtime";
 import { useSocket } from "../lib/useSocket";
+import { mergeChatMessages } from "../lib/chat-messages";
+import { Button } from "@/components/ui/button";
+import { ComposerInput } from "@/components/workspace/composer-input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetTrigger } from "@/components/ui/sheet";
+import { ThreadSidebar } from "@/components/workspace/thread-sidebar";
+import { ThemeMenu } from "@/components/workspace/theme-menu";
+import { StatusBadge } from "@/components/workspace/status-badge";
+import { ChatMessageItem } from "@/components/workspace/chat-message-item";
+import { useMessageScroll } from "@/lib/use-message-scroll";
 
 type LoadState = "booting" | "ready" | "error";
+type PendingSubmission = { threadId: string; cancellation: Promise<boolean> | null };
 
 let pendingBootThread: Promise<ChatThread> | null = null;
 
@@ -68,8 +83,10 @@ export default function Home() {
   const [isStopping, setIsStopping] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDagCollapsed, setIsDagCollapsed] = useState(false);
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const shouldStickMessagesToBottomRef = useRef(true);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileDagOpen, setMobileDagOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.threadId === activeThreadId) ?? null,
@@ -82,28 +99,12 @@ export default function Home() {
       || tasks.some((task) => task.status === "queued" || task.status === "processing"),
     [activeThread?.status, isSending, tasks]
   );
-
-  const threadOrderById = useMemo(() => {
-    return new Map(
-      [...threads]
-        .sort((left, right) => {
-          const leftTime = new Date(left.createdAt).getTime();
-          const rightTime = new Date(right.createdAt).getTime();
-          const leftSortTime = Number.isFinite(leftTime) ? leftTime : 0;
-          const rightSortTime = Number.isFinite(rightTime) ? rightTime : 0;
-          if (leftSortTime !== rightSortTime) {
-            return leftSortTime - rightSortTime;
-          }
-          return left.threadId.localeCompare(right.threadId);
-        })
-        .map((thread, index) => [thread.threadId, index + 1])
-    );
-  }, [threads]);
+  const { viewportRef, railRef, onScroll, followLatest, showLatest } = useMessageScroll(messages, activeThreadId, loadState === "ready", isAwaitingAgentOutput);
 
   const activeTraceIdRef = useRef<string | null>(null);
   const activeThreadIdRef = useRef<string | null>(null);
-  const inflightThreadIdRef = useRef<string | null>(null);
-  const canceledThreadIdRef = useRef<string | null>(null);
+  const historyRequestIdRef = useRef(0);
+  const pendingSubmissionRef = useRef<PendingSubmission | null>(null);
 
   const isThreadStillActive = useCallback((threadId: string) => activeThreadIdRef.current === threadId, []);
 
@@ -147,16 +148,16 @@ export default function Home() {
   }, []);
 
   const loadThreadData = useCallback(async (threadId: string) => {
-    // 标记当前正在 in-flight 的 threadId；后到的请求会覆盖这个 ref。
-    inflightThreadIdRef.current = threadId;
+    // A → B → A must not make the first A request eligible again.
+    const requestId = ++historyRequestIdRef.current;
     // 两个接口独立 fetch + 独立写状态：单边 5xx 不会让另一边的数据连带消失。
     const loadMessages = listMessages(threadId).then((next) => {
-      if (inflightThreadIdRef.current === threadId && isThreadStillActive(threadId)) {
-        setMessages(next);
+      if (historyRequestIdRef.current === requestId && isThreadStillActive(threadId)) {
+        setMessages((current) => mergeChatMessages(current, next, "snapshot"));
       }
     });
     const loadInvocationMessages = listInvocationMessages(threadId).then((next) => {
-      if (inflightThreadIdRef.current === threadId && isThreadStillActive(threadId)) {
+      if (historyRequestIdRef.current === requestId && isThreadStillActive(threadId)) {
         setInvocationMessages(next);
       }
     });
@@ -180,8 +181,10 @@ export default function Home() {
       }
       return;
     }
+    // A closing socket can still deliver queued events for the previous thread.
+    if (event.threadId !== activeThreadIdRef.current) return;
     if (event.type === REALTIME_EVENT_TYPES.chatMessage) {
-      setMessages((current) => upsertTailBy(current, event.payload as ChatMessage, "messageId"));
+      setMessages((current) => mergeChatMessages(current, [event.payload as ChatMessage]));
       return;
     }
     if (event.type === REALTIME_EVENT_TYPES.task) {
@@ -200,19 +203,11 @@ export default function Home() {
     }
   }, [activeThreadId, threads]);
 
-  const handleDeleteThread = useCallback(async (threadId: string, title: string) => {
-    if (typeof window !== "undefined" && !window.confirm(`删除会话 "${title}"？此操作不可撤销。`)) {
-      return;
-    }
-    try {
-      await deleteThread(threadId);
-      // 乐观更新：API 返回后立刻从本地移除，不等 WS 事件（同一浏览器收到自己的 WS 也是同样的清理，幂等）。
-      setThreads((current) => current.filter((thread) => thread.threadId !== threadId));
-      if (activeThreadIdRef.current === threadId) {
-        setActiveThreadId(null);
-      }
-    } catch (error) {
-      window.alert(`删除失败：${error instanceof Error ? error.message : "未知错误"}`);
+  const handleDeleteThread = useCallback(async (threadId: string) => {
+    await deleteThread(threadId);
+    setThreads((current) => current.filter((thread) => thread.threadId !== threadId));
+    if (activeThreadIdRef.current === threadId) {
+      setActiveThreadId(null);
     }
   }, []);
 
@@ -261,45 +256,58 @@ export default function Home() {
     if (!activeThreadId) {
       return;
     }
-    shouldStickMessagesToBottomRef.current = true;
     loadThreadData(activeThreadId).catch(() => undefined);
   }, [activeThreadId, loadThreadData]);
 
-  useEffect(() => {
-    if (shouldStickMessagesToBottomRef.current) {
-      scrollToBottom(viewportRef.current);
-    }
-  }, [messages]);
-
   async function handleNewThread() {
-    const thread = await createThread();
-    setThreads((current) => [thread, ...current]);
-    setActiveThreadId(thread.threadId);
+    if (isCreating) return;
+    setIsCreating(true);
+    setNotice(null);
+    try {
+      const thread = await createThread();
+      setThreads((current) => [thread, ...current]);
+      setActiveThreadId(thread.threadId);
+      setMobileSidebarOpen(false);
+    } catch (error) {
+      setMobileSidebarOpen(false);
+      setNotice(`创建失败：${error instanceof Error ? error.message : "请稍后重试"}`);
+    } finally {
+      setIsCreating(false);
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = input.trim();
-    if (!content || !activeThreadId || isSending) {
+    if (!content || !activeThreadId || pendingSubmissionRef.current || isStopping) {
       return;
     }
     const threadId = activeThreadId;
+    const submission: PendingSubmission = { threadId, cancellation: null };
+    pendingSubmissionRef.current = submission;
     setInput("");
+    setNotice(null);
     setIsSending(true);
-    shouldStickMessagesToBottomRef.current = true;
+    followLatest();
     try {
       const result = await sendMessage(threadId, content);
-      if (!isThreadStillActive(threadId) || canceledThreadIdRef.current === threadId) {
+      // Only a cancellation attached to this request can invalidate its response.
+      // Wait for the outcome so a failed Stop does not discard a successful send.
+      const canceled = submission.cancellation ? await submission.cancellation : false;
+      if (!isThreadStillActive(threadId) || canceled) {
         return;
       }
       setThreads((current) => upsertHeadBy(current, result.thread, "threadId"));
-      setMessages((current) => upsertTailBy(current, result.message, "messageId"));
-      if (result.assistantMessage) {
-        setMessages((current) => upsertTailBy(current, result.assistantMessage as ChatMessage, "messageId"));
-      }
+      setMessages((current) => mergeChatMessages(current,
+        result.assistantMessage ? [result.message, result.assistantMessage] : [result.message]));
       setTasks((current) => upsertManyTailBy(current, result.tasks, "taskId"));
-      await refreshAgents();
+      await refreshAgents().catch(() => undefined);
+    } catch (error) {
+      if (isThreadStillActive(threadId)) {
+        setNotice(`发送失败：${error instanceof Error ? error.message : "请稍后重试"}`);
+      }
     } finally {
+      pendingSubmissionRef.current = null;
       setIsSending(false);
     }
   }
@@ -309,10 +317,14 @@ export default function Home() {
       return;
     }
     const threadId = activeThreadId;
-    canceledThreadIdRef.current = threadId;
     setIsStopping(true);
+    const cancellation = cancelThreadWork(threadId);
+    const submission = pendingSubmissionRef.current;
+    if (submission?.threadId === threadId) {
+      submission.cancellation = cancellation.then(() => true, () => false);
+    }
     try {
-      const result = await cancelThreadWork(threadId);
+      const result = await cancellation;
       if (isThreadStillActive(threadId)) {
         setTasks((current) => current.map((task) => (
           result.canceledTaskIds.includes(task.taskId)
@@ -322,8 +334,7 @@ export default function Home() {
       }
       await Promise.allSettled([refreshThreads(), refetchTasks(), refreshAgents()]);
     } catch (error) {
-      canceledThreadIdRef.current = null;
-      window.alert(`停止任务失败：${error instanceof Error ? error.message : "未知错误"}`);
+      setNotice(`停止任务失败：${error instanceof Error ? error.message : "未知错误"}`);
     } finally {
       setIsStopping(false);
     }
@@ -337,117 +348,71 @@ export default function Home() {
   );
 
   if (loadState === "booting") {
-    return <BootScreen label="Connecting platform" />;
+    return <BootScreen label="正在连接协作空间" />;
   }
 
   if (loadState === "error") {
-    return <BootScreen label="Platform API unavailable" tone="danger" />;
+    return <BootScreen label="暂时无法连接平台" tone="danger" />;
   }
 
   return (
     <main className={`shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${isDagCollapsed ? "dag-collapsed" : ""}`}>
-      <section className={`sidebar ${isSidebarCollapsed ? "collapsed" : ""}`}>
+      <a href="#message-input" className="skip-link">跳转到消息输入</a>
+      <aside className="sidebar desktop-sidebar">
         {isSidebarCollapsed ? (
-          <div className="sidebar-collapsed-bar" aria-label="Collapsed threads">
-            <button className="icon-button strong" onClick={() => setIsSidebarCollapsed(false)} aria-label="展开历史会话">
-              <ChevronsRight size={18} />
-            </button>
-            <button className="icon-button" onClick={handleNewThread} aria-label="New thread">
-              <Plus size={18} />
-            </button>
-            <div className="collapsed-agent-count">
-              <Bot size={16} />
-              <span>{threads.length}</span>
-            </div>
+          <div className="sidebar-collapsed-bar">
+            <Button variant="ghost" size="icon" onClick={() => setIsSidebarCollapsed(false)} aria-label="展开历史会话"><ChevronsRight /></Button>
+            <Button variant="ghost" size="icon" onClick={handleNewThread} disabled={isCreating} aria-label="新建任务"><Plus /></Button>
           </div>
-        ) : (
-          <>
-            <header className="brand-row">
-              <div>
-                <p className="eyebrow">Agent Crossing</p>
-              </div>
-              <div className="header-actions">
-                <button className="icon-button" onClick={() => setIsSidebarCollapsed(true)} aria-label="收起历史会话">
-                  <ChevronsLeft size={18} />
-                </button>
-              </div>
-            </header>
-
-            <button className="sidebar-new-thread" onClick={handleNewThread} aria-label="New thread">
-              <Plus size={16} />
-              <span>新建任务</span>
-            </button>
-
-            <div className="agent-strip">
-              <div className="agent-strip-title">当前在线</div>
-              {agents.map((agent) => (
-                <button key={agent.agentId} className={`agent-chip ${agent.status}`}>
-                  <span className="agent-presence-mark">
-                    <span className="pulse-dot" />
-                  </span>
-                  <span className="agent-chip-copy">
-                    <span>{agentName(agents, agent.agentId)}</span>
-                    <small>{agent.status === "running" ? "运行中" : "空闲"}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-
-            <div className="thread-list">
-              {threads.map((thread) => (
-                <div key={thread.threadId} className="thread-item-wrapper">
-                  <button
-                    className={`thread-item ${thread.threadId === activeThreadId ? "active" : ""}`}
-                    onClick={() => setActiveThreadId(thread.threadId)}
-                  >
-                    <span className="thread-copy">
-                      <small>
-                        <span className="thread-dash">-</span>
-                        TASK-{threadOrderById.get(thread.threadId) ?? 1}
-                      </small>
-                      <strong>{thread.title}</strong>
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="thread-delete"
-                    onClick={() => handleDeleteThread(thread.threadId, thread.title)}
-                    aria-label={`删除会话 ${thread.title}`}
-                    title="删除会话"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </section>
-
-      <section className="workspace">
+        ) : <ThreadSidebar threads={threads} agents={agents} activeThreadId={activeThreadId} creating={isCreating} onCreate={handleNewThread} onSelect={setActiveThreadId} onDelete={handleDeleteThread} onCollapse={() => setIsSidebarCollapsed(true)} />}
+      </aside>
+      <section className="workspace" aria-label="协作对话">
+        <header className="workspace-header">
+          <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+            <SheetTrigger asChild><Button variant="ghost" size="icon" className="md:hidden" aria-label="打开会话列表"><Menu /></Button></SheetTrigger>
+            <SheetContent side="left" className="w-[min(320px,90vw)] gap-0 p-0">
+              <SheetHeader className="sr-only"><SheetTitle>历史会话</SheetTitle><SheetDescription>选择会话或新建任务</SheetDescription></SheetHeader>
+              <ThreadSidebar threads={threads} agents={agents} activeThreadId={activeThreadId} creating={isCreating} onCreate={handleNewThread} onSelect={(id) => { setActiveThreadId(id); setMobileSidebarOpen(false); }} onDelete={handleDeleteThread} />
+            </SheetContent>
+          </Sheet>
+          <div className="workspace-heading">
+            <h1>{activeThread?.title ?? "Agent Crossing"}</h1>
+            <p>协作对话</p>
+          </div>
+          {activeThread && <StatusBadge status={activeThread.status} />}
+          <ThemeMenu />
+          <Sheet open={mobileDagOpen} onOpenChange={setMobileDagOpen}>
+            <SheetTrigger asChild><Button variant="ghost" size="icon" className="xl:hidden" aria-label="打开任务视图"><GitBranch /></Button></SheetTrigger>
+            <SheetContent side="right" showCloseButton={false} className="w-[min(380px,95vw)] gap-0 p-0">
+              <SheetHeader className="sr-only"><SheetTitle>任务视图</SheetTitle><SheetDescription>查看当前会话的任务依赖和执行详情</SheetDescription></SheetHeader>
+              <DagPanel tasks={tasks} agents={agents} messages={messages} traceId={activeThread?.traceId ?? null} invocationMessages={invocationMessages} onCollapse={() => setMobileDagOpen(false)} />
+            </SheetContent>
+          </Sheet>
+        </header>
+        {notice && <div role="alert" className="notice"><span>{notice}</span><Button variant="ghost" size="icon-sm" onClick={() => setNotice(null)} aria-label="关闭提示"><X /></Button></div>}
         <div className="conversation">
-          <div
-            className="message-viewport"
-            ref={viewportRef}
-            onScroll={(event) => {
-              shouldStickMessagesToBottomRef.current = isNearBottom(event.currentTarget);
-            }}
-          >
-            <div className="message-rail">
-              {messages.length === 0 ? (
-                <EmptyConversation />
-              ) : (
-                messages.map((message) => (
-                  <MessageBubble key={message.messageId} message={message} agents={agents} />
-                ))
-              )}
-              {isAwaitingAgentOutput ? <ProcessingIndicator /> : null}
+          <div className="message-scroll-area">
+            <div className="message-viewport" ref={viewportRef} onScroll={onScroll}>
+              <div className="message-rail" ref={railRef}>
+                {messages.length === 0 ? (
+                  <EmptyConversation />
+                ) : (
+                  messages.map((message) => (
+                    <ChatMessageItem key={message.messageId} message={message} {...messageAgentMeta(message, agents)} />
+                  ))
+                )}
+                {isAwaitingAgentOutput && !messages.some((message) => message.status === "streaming") ? <ProcessingIndicator /> : null}
+              </div>
             </div>
+            {showLatest && <Button className="jump-to-latest rounded-full shadow-sm" variant="outline" size="sm" onClick={followLatest}><ArrowDown />回到最新消息</Button>}
           </div>
 
           <form className="composer" onSubmit={handleSubmit}>
             <div className="composer-rail">
-              <textarea
+              <label htmlFor="message-input" className="sr-only">消息内容</label>
+              <ComposerInput
+                id="message-input"
+                aria-describedby="composer-help"
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => {
@@ -456,35 +421,38 @@ export default function Home() {
                     event.currentTarget.form?.requestSubmit();
                   }
                 }}
-                placeholder="@opencode 规划并执行下一步"
+                placeholder="发送消息，或用 @ 指定 Agent"
                 rows={1}
               />
-              <button
-                className={`send-button ${canCancelActiveWork ? "stop-button" : ""}`}
-                type={canCancelActiveWork ? "button" : "submit"}
-                onClick={canCancelActiveWork ? () => void handleCancel() : undefined}
-                disabled={canCancelActiveWork ? isStopping : !input.trim() || isSending}
-                aria-label={canCancelActiveWork ? "停止当前任务" : "发送消息"}
-                title={canCancelActiveWork ? "停止当前任务" : "发送消息"}
-              >
-                {canCancelActiveWork
-                  ? (isStopping ? <Loader2 className="spin" size={18} /> : <Square size={15} fill="currentColor" />)
-                  : (isSending ? <Loader2 className="spin" size={18} /> : <Send size={18} />)}
-              </button>
+              <div className="composer-actions">
+                <span id="composer-help" className="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span>
+                <Button
+                  className="size-9 rounded-full bg-foreground text-background shadow-none hover:bg-foreground/85 disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
+                  size="icon"
+                  type={canCancelActiveWork ? "button" : "submit"}
+                  onClick={canCancelActiveWork ? () => void handleCancel() : undefined}
+                  disabled={canCancelActiveWork ? isStopping : !activeThreadId || !input.trim() || isSending}
+                  aria-label={canCancelActiveWork ? "停止当前任务" : "发送消息"}
+                  title={canCancelActiveWork ? "停止当前任务" : "发送消息"}
+                >
+                  {canCancelActiveWork
+                    ? (isStopping ? <Loader2 className="spin" size={18} /> : <Square className="size-3.5" fill="currentColor" />)
+                    : (isSending ? <Loader2 className="spin" size={18} /> : <ArrowUp className="size-5" strokeWidth={2.25} />)}
+                </Button>
+              </div>
             </div>
           </form>
         </div>
       </section>
 
       {isDagCollapsed ? (
-        <aside className="dag-collapsed-panel" aria-label="Collapsed DAG">
-          <button className="dag-collapsed-button" onClick={() => setIsDagCollapsed(false)} aria-label="展开 DAG">
+        <aside className="dag-collapsed-panel desktop-dag" aria-label="Collapsed DAG">
+          <Button variant="ghost" size="icon" onClick={() => setIsDagCollapsed(false)} aria-label="展开 DAG">
             <ChevronsLeft size={18} />
-            <GitBranch size={18} />
-            <span>DAG</span>
-          </button>
+          </Button>
         </aside>
       ) : (
+        <div className="desktop-dag min-h-0">
         <DagPanel
           tasks={tasks}
           agents={agents}
@@ -493,6 +461,7 @@ export default function Home() {
           invocationMessages={invocationMessages}
           onCollapse={() => setIsDagCollapsed(true)}
         />
+        </div>
       )}
     </main>
   );
@@ -502,28 +471,13 @@ function BootScreen({ label, tone = "normal" }: { label: string; tone?: "normal"
   return (
     <main className="boot-screen">
       <div className={`boot-card ${tone}`}>
-        <Sparkles size={24} />
-        <span>{label}</span>
+        <span className="brand-wordmark">Agent Crossing</span>
+        <span role={tone === "danger" ? "alert" : "status"}>{label}</span>
+        {tone === "danger"
+          ? <Button variant="outline" onClick={() => window.location.reload()}>重新连接</Button>
+          : <div aria-hidden="true" className="space-y-3"><Skeleton className="h-10 w-full" /><Skeleton className="h-4 w-4/5" /><Skeleton className="h-4 w-3/5" /></div>}
       </div>
     </main>
-  );
-}
-
-function MessageBubble({ message, agents }: { message: ChatMessage; agents: AgentStatus[] }) {
-  const isUser = message.role === "user";
-  const meta = messageAgentMeta(message, agents);
-  return (
-    <article className={`message ${isUser ? "user" : "assistant"} ${meta.className}`}>
-      <div className="message-icon">{isUser ? <UserRound size={16} /> : meta.icon}</div>
-      <div className="message-body">
-        <div className="message-meta">
-          <span>{isUser ? "You" : meta.label}</span>
-          {!isUser && message.agentId ? <span className="agent-id-tag">{message.agentId}</span> : null}
-          <time>{formatTime(message.createdAt)}</time>
-        </div>
-        <p>{message.content}</p>
-      </div>
-    </article>
   );
 }
 
@@ -533,7 +487,7 @@ function EmptyConversation() {
       <div className="empty-orbit">
         <Bot size={30} />
       </div>
-      <h3>开始一次 Agent 协作</h3>
+      <h2>开始一次 Agent 协作</h2>
       <p>输入任务后，系统会自动规划执行步骤，并在右侧同步展示 DAG 状态。</p>
       <div className="empty-hints">
         <span><CornerDownLeft size={14} /> Enter 发送</span>
@@ -590,14 +544,6 @@ function shortId(value: string) {
   return value.replace(/^([a-z]+-)/, "").slice(0, 8);
 }
 
-function formatTime(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  }).format(new Date(value));
-}
-
 function formatDateTime24(value: string) {
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -652,14 +598,6 @@ function taskOutputContent(
     .join("\n");
 }
 
-function isNearBottom(element: HTMLElement, threshold = 80) {
-  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
-}
-
-function scrollToBottom(element: HTMLElement | null) {
-  element?.scrollTo({ top: element.scrollHeight, behavior: "auto" });
-}
-
 function ensureBootThread() {
   pendingBootThread ??= createThread().finally(() => {
     pendingBootThread = null;
@@ -692,9 +630,9 @@ const defaultDagEdgeOptions = {
     type: MarkerType.ArrowClosed,
     width: 18,
     height: 18,
-    color: "#536176"
+    color: "var(--edge)"
   },
-  style: { strokeWidth: 2.3, stroke: "#536176" }
+  style: { strokeWidth: 2.3, stroke: "var(--edge)" }
 };
 
 type TaskFlowNodeData = {
@@ -750,10 +688,10 @@ function DagPanel({
   return (
     <aside className="steps-panel">
       <div className="panel-heading">
-        <button className="icon-button panel-toggle" onClick={onCollapse} aria-label="收起 DAG">
-          <ChevronsRight size={17} />
-        </button>
-        <span>任务视图</span>
+        <GitBranch size={16} />
+        <h2>任务视图</h2>
+        <span className="text-xs text-muted-foreground font-mono">{tasks.length}</span>
+        <Button variant="ghost" size="icon-sm" className="panel-toggle" onClick={onCollapse} aria-label="收起 DAG"><ChevronsRight /></Button>
       </div>
       {dagNodes.length === 0 ? (
         <div className="steps-empty">
@@ -780,7 +718,8 @@ function DagPanel({
             onNodeClick={handleNodeClick}
             proOptions={{ hideAttribution: true }}
           >
-            <Background color="#d7dde8" gap={24} size={1} />
+            <FitTaskViewport />
+            <Background color="var(--border)" gap={24} size={1} />
             <Controls showInteractive={false} />
           </ReactFlow>
         </div>
@@ -798,6 +737,17 @@ function DagPanel({
   );
 }
 
+// Inspector and responsive drawers resize the graph without remounting its nodes.
+function FitTaskViewport() {
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
+  const { fitView } = useReactFlow();
+  useEffect(() => {
+    if (width > 0 && height > 0) void fitView({ padding: 0.18, maxZoom: 1.1 });
+  }, [width, height, fitView]);
+  return null;
+}
+
 function TaskFlowNodeCard({ data }: NodeProps<TaskFlowNode>) {
   const status = data.task.status;
   const title = data.title;
@@ -809,7 +759,7 @@ function TaskFlowNodeCard({ data }: NodeProps<TaskFlowNode>) {
           <span className="dag-node-signal" aria-hidden="true" />
           <strong>{title}</strong>
         </div>
-        <span className={`dag-node-status ${status}`}>{data.statusLabel}</span>
+        <StatusBadge status={status} />
         <span className="dag-node-agent">
           <Bot size={12} />
           {data.agentLabel}
@@ -841,9 +791,7 @@ function DagNodeInspector({
     <section className="dag-inspector" aria-label="Selected task details">
       <div className="dag-inspector-head">
         <span>Task {index} details</span>
-        <button type="button" onClick={onClose} aria-label="Close task details">
-          ×
-        </button>
+        <Button variant="ghost" size="icon-sm" type="button" onClick={onClose} aria-label="关闭任务详情"><X /></Button>
       </div>
       <div className="dag-detail-row">
         <span>agent</span>

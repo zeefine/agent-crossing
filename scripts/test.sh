@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "Agent Crossing test"
 
+# Isolated lifecycle regression tests; no real agents, Docker or MySQL involved.
+python3 -m unittest discover -s "${ROOT_DIR}/scripts/tests" -v
+
 if [[ -f "${ROOT_DIR}/services/platform-api/gradlew" ]]; then
   "${ROOT_DIR}/services/platform-api/gradlew" -p "${ROOT_DIR}/services/platform-api" test
 elif [[ -f "${ROOT_DIR}/services/platform-api/pom.xml" ]]; then

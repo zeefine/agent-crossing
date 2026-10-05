@@ -27,6 +27,8 @@ node_modules/
 .next/
 .next.stale-*/
 coverage/
+playwright-report/
+test-results/
 *.tsbuildinfo
 
 # Python
